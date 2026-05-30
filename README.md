@@ -122,6 +122,8 @@ npm run dev
 
 `GET /api/environmental-risk?lat=43.6532&lng=-79.3832` combines hourly-refreshed TRCA regulatory floodplain exposure, five-minute Environment Canada GeoMet weather alerts, and five-minute supplemental current conditions from Open-Meteo. Each upstream result includes freshness and stale-cache metadata. These feeds are anonymous and do not require API keys.
 
+`GET /api/risk-map` returns locally computed predictive ward risk summaries. `POST /api/incident` keeps its original response fields and adds ward risk, compound risk factors, prediction-confirmation escalation, and measured gateway performance metadata.
+
 ### Frontend (`.env.local`)
 
 | Variable | Description |

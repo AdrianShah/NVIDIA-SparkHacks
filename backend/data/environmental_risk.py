@@ -59,6 +59,15 @@ def clear_caches() -> None:
     _conditions_cache.clear()
 
 
+def feed_cache_status() -> dict[str, str]:
+    """Report local cache readiness without blocking health checks on the network."""
+    return {
+        "trca_floodplain": "cached" if _flood_cache else "configured",
+        "environment_canada_alerts": "cached" if _alerts_cache else "configured",
+        "open_meteo_conditions": "cached" if _conditions_cache else "configured",
+    }
+
+
 async def _cached_lookup(
     cache: dict[tuple[float, float], _CacheEntry],
     key: tuple[float, float],

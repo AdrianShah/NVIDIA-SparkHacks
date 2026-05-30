@@ -19,6 +19,12 @@ def test_health_reports_contract_shape():
     assert body["status"] == "ok"
     assert body["mock_mode"] is True
     assert set(body["models_loaded"]) == {"whisper", "kokoro"}
+    assert set(body["data_loaded"]) == {"hydrants", "buildings", "streets", "311_requests"}
+    assert set(body["external_feeds"]) == {
+        "trca_floodplain",
+        "environment_canada_alerts",
+        "open_meteo_conditions",
+    }
 
 
 def test_mock_incident_preserves_section_10_shape():
@@ -33,7 +39,7 @@ def test_mock_incident_preserves_section_10_shape():
 
     assert response.status_code == 200
     body = response.json()
-    assert set(body) == {"report", "urgency", "vision", "spatial"}
+    assert {"report", "urgency", "vision", "spatial"} <= set(body)
     assert body["urgency"] == "CRITICAL"
     assert body["vision"]["hazard_type"] == "Flooding"
     assert body["spatial"]["closest_hydrant"]["id"] == 1042
@@ -87,6 +93,7 @@ def test_synthesize_returns_wav_even_without_kokoro():
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("audio/wav")
+    assert "x-latency-ms" in response.headers
     assert response.content.startswith(b"RIFF")
 
 
