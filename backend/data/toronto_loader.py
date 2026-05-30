@@ -156,6 +156,13 @@ def get_closest_hydrants(lat: float, lng: float, n: int = 3) -> list[dict]:
     return results
 
 
+def _row_val(row: pd.Series, *keys: str, default=""):
+    for key in keys:
+        if key in row.index and pd.notna(row[key]):
+            return row[key]
+    return default
+
+
 def get_building_specs(lat: float, lng: float) -> dict:
     """Return the nearest apartment building evaluation record to (lat, lng)."""
     if _buildings_gdf is None or len(_buildings_gdf) == 0:
@@ -173,14 +180,28 @@ def get_building_specs(lat: float, lng: float) -> dict:
     b_lng, b_lat = _to_wgs84.transform(row.geometry.x, row.geometry.y)
 
     return {
-        "address": str(row.get("SITE_ADDRESS", row.get("ADDRESS", "Unknown"))),
+        "address": str(_row_val(row, "SITE ADDRESS", "SITE_ADDRESS", "ADDRESS", default="Unknown")),
         "distance_meters": round(float(dist), 1),
-        "floors": int(row.get("CONFIRMED_STOREYS", row.get("STOREYS", 0)) or 0),
-        "units": int(row.get("CONFIRMED_UNITS", row.get("UNITS", 0)) or 0),
-        "score": float(row.get("SCORE", row.get("EVALUATION_SCORE", 0)) or 0),
-        "year_built": int(row.get("YEAR_BUILT", 0) or 0),
-        "property_type": str(row.get("PROPERTY_TYPE", "")),
-        "contact": str(row.get("PROPERTY_MANAGER", row.get("CURRENT_OWNER", "Toronto Housing"))),
+        "floors": int(_row_val(row, "CONFIRMED STOREYS", "CONFIRMED_STOREYS", "STOREYS", default=0) or 0),
+        "units": int(_row_val(row, "CONFIRMED UNITS", "CONFIRMED_UNITS", "UNITS", default=0) or 0),
+        "score": float(
+            _row_val(
+                row,
+                "CURRENT BUILDING EVAL SCORE",
+                "SCORE",
+                "EVALUATION_SCORE",
+                default=0,
+            )
+            or 0
+        ),
+        "year_built": int(_row_val(row, "YEAR BUILT", "YEAR_BUILT", default=0) or 0),
+        "property_type": str(_row_val(row, "PROPERTY TYPE", "PROPERTY_TYPE", default="")),
+        "contact": str(
+            _row_val(row, "PROPERTY_MANAGER", "CURRENT_OWNER", default="Toronto Housing")
+        ),
+        "last_inspection": str(
+            _row_val(row, "EVALUATION COMPLETED ON", "LAST_INSPECTION", default="")
+        ),
         "lat": round(b_lat, 6),
         "lng": round(b_lng, 6),
     }
