@@ -16,9 +16,21 @@ export interface SpatialData {
     units: number;
     distance_meters: number;
     score: number;
+    last_inspection?: string;
     lat?: number;
     lng?: number;
   };
+  nearest_road?: {
+    road_name: string;
+    distance_meters: number;
+  };
+  history_311?: Array<{
+    type: string;
+    status: string;
+    created: string;
+    ward: string;
+    intersection: string;
+  }>;
   query_location?: { lat: number; lng: number };
 }
 
@@ -60,6 +72,15 @@ export default function MapView({ gps, spatial, urgency, isActive }: MapViewProp
       const L = mod.default;
       LRef.current = L;
 
+      // Remove stale Leaflet instance from container (React Strict Mode double-invoke)
+      const container = containerRef.current!;
+      if ((container as any)._leaflet_id) {
+        mapRef.current?.remove();
+        mapRef.current = null;
+        delete (container as any)._leaflet_id;
+      }
+      if (mapRef.current) return;
+
       // Fix broken default icon paths in bundled environments
       delete (L.Icon.Default.prototype as any)._getIconUrl;
       L.Icon.Default.mergeOptions({
@@ -68,7 +89,7 @@ export default function MapView({ gps, spatial, urgency, isActive }: MapViewProp
         shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
       });
 
-      const map = L.map(containerRef.current!, { zoomControl: true }).setView(TORONTO, 13);
+      const map = L.map(container, { zoomControl: true }).setView(TORONTO, 13);
 
       L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
         attribution:

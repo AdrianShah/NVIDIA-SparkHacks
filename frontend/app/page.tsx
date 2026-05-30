@@ -337,6 +337,34 @@ export default function HomePage() {
               ))}
             </div>
           )}
+
+          {/* Nearest road */}
+          {spatial?.nearest_road && (
+            <div className="mt-2 rounded border border-yellow-900/30 bg-yellow-950/10 p-2.5">
+              <p className="text-[10px] font-mono text-yellow-600 uppercase tracking-widest mb-1">
+                Nearest Road
+              </p>
+              <div className="flex justify-between text-[11px] font-mono text-gray-400">
+                <span className="text-yellow-400">{spatial.nearest_road.road_name}</span>
+                <span>{spatial.nearest_road.distance_meters} m</span>
+              </div>
+            </div>
+          )}
+
+          {/* 311 history */}
+          {spatial?.history_311 && spatial.history_311.length > 0 && (
+            <div className="mt-2 rounded border border-purple-900/30 bg-purple-950/10 p-2.5">
+              <p className="text-[10px] font-mono text-purple-500 uppercase tracking-widest mb-1.5">
+                311 History (Ward)
+              </p>
+              {spatial.history_311.slice(0, 3).map((r, i) => (
+                <div key={i} className="text-[11px] font-mono text-gray-500 py-0.5 truncate">
+                  <span className="text-purple-400">{r.type}</span>
+                  <span className="ml-2 text-gray-600">{r.status}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Dispatch report — bottom half */}
