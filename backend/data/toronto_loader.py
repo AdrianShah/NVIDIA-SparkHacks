@@ -13,6 +13,7 @@ import json
 import logging
 import math
 import os
+import re
 from pathlib import Path
 
 import geopandas as gpd
@@ -44,6 +45,13 @@ _requests_df: pd.DataFrame | None = None
 
 _to_utm = Transformer.from_crs("EPSG:4326", TARGET_CRS, always_xy=True)
 _to_wgs84 = Transformer.from_crs(TARGET_CRS, "EPSG:4326", always_xy=True)
+
+# 311 CSV has no lat/lng — filter by ward + service type keywords
+_POTHOLE_NOISE_PATTERN = re.compile(
+    r"pothole|road damage|road surface|noise|sound|party|construction noise",
+    re.IGNORECASE,
+)
+_WARD_NUM_PATTERN = re.compile(r"\((\d+)\)\s*$")
 
 
 def _point_utm(lat: float, lng: float) -> Point:
@@ -137,7 +145,13 @@ def load_all() -> None:
     requests_path = DATA_DIR / "311-service-requests.csv"
     if requests_path.exists():
         try:
-            _requests_df = pd.read_csv(requests_path, low_memory=False, on_bad_lines="skip")
+            _requests_df = pd.read_csv(
+                requests_path,
+                encoding="latin-1",
+                low_memory=False,
+                on_bad_lines="skip",
+            )
+            _requests_df["_ward_num"] = _requests_df["Ward"].map(_parse_ward_number)
             logger.info("Loaded %d 311 service requests", len(_requests_df))
         except Exception as exc:
             logger.warning("Could not load 311 CSV: %s", exc)
@@ -273,10 +287,79 @@ def get_nearest_road(lat: float, lng: float) -> dict:
     }
 
 
-def get_311_history(lat: float, lng: float, radius_km: float = 0.5, limit: int = 10) -> list[dict]:
-    """Return recent 311 service requests near (lat, lng)."""
+def _parse_ward_number(ward_label: str | float) -> int | None:
+    if ward_label is None or (isinstance(ward_label, float) and math.isnan(ward_label)):
+        return None
+    match = _WARD_NUM_PATTERN.search(str(ward_label))
+    return int(match.group(1)) if match else None
+
+
+def _ward_from_point(lat: float, lng: float) -> int | None:
+    """Infer city ward from nearest RentSafeTO building (311 CSV has no coordinates)."""
+    if _buildings_gdf is None or len(_buildings_gdf) == 0:
+        return None
+    point = _point_utm(lat, lng)
+    nearest_idx = _buildings_gdf.geometry.distance(point).idxmin()
+    ward = _buildings_gdf.loc[nearest_idx].get("WARD")
+    if ward is None or (isinstance(ward, float) and math.isnan(ward)):
+        return None
+    try:
+        return int(ward)
+    except (TypeError, ValueError):
+        return _parse_ward_number(ward)
+
+
+def get_311_history(
+    lat: float,
+    lng: float,
+    radius_km: float = 0.5,
+    limit: int = 10,
+    *,
+    pothole_noise_only: bool = True,
+) -> list[dict]:
+    """Return recent 311 requests in the incident ward (pothole / noise types by default).
+
+    Toronto's 311 export has no lat/lng; ward is inferred from the nearest apartment record.
+    radius_km is reserved for future geocoded data — currently ward-level only.
+    """
+    del radius_km  # ward-level filtering until intersection geocoding exists
     if _requests_df is None or len(_requests_df) == 0:
         return []
 
-    # 311 data doesn't always have coordinates; filter by ward if available
-    return []
+    ward_num = _ward_from_point(lat, lng)
+    df = _requests_df
+    if ward_num is not None and "_ward_num" in df.columns:
+        df = df[df["_ward_num"] == ward_num]
+
+    if pothole_noise_only and "Service Request Type" in df.columns:
+        mask = df["Service Request Type"].astype(str).str.contains(
+            _POTHOLE_NOISE_PATTERN, na=False
+        )
+        df = df[mask]
+
+    if df.empty:
+        return []
+
+    if "Creation Date" in df.columns:
+        df = df.sort_values("Creation Date", ascending=False)
+
+    results = []
+    for _, row in df.head(limit).iterrows():
+        results.append({
+            "type": str(_row_val(row, "Service Request Type", default="Unknown")),
+            "status": str(_row_val(row, "Status", default="")),
+            "created": str(_row_val(row, "Creation Date", default="")),
+            "ward": str(_row_val(row, "Ward", default="")),
+            "postal_prefix": str(
+                _row_val(row, "First 3 Chars of Postal Code", default="")
+            ),
+            "intersection": " / ".join(
+                s
+                for s in (
+                    str(_row_val(row, "Intersection Street 1", default="")).strip(),
+                    str(_row_val(row, "Intersection Street 2", default="")).strip(),
+                )
+                if s and s.lower() != "nan"
+            ),
+        })
+    return results
