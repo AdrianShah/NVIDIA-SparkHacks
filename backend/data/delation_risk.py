@@ -59,7 +59,11 @@ def _ward_record(ward_id: int | None, floodplain: bool = False) -> dict[str, Any
     )
     flood_311 = _flood_311_count(ward_id)
     vulnerable_buildings = int((scores < 70).sum())
-    score = min(100.0, flood_311 * 3.0 + vulnerable_buildings * 1.5 + (25.0 if floodplain else 0.0))
+    # Multipliers calibrated to Toronto 311 data:
+    # flood_311 ranges 300-1200 across wards → *0.06 gives 18-72 base spread
+    # vulnerable_buildings typically 0-30 → *1.5 adds 0-45
+    # floodplain intersection adds 20 points on top
+    score = min(100.0, flood_311 * 0.06 + vulnerable_buildings * 1.5 + (20.0 if floodplain else 0.0))
     signals = []
     if floodplain:
         signals.append("TRCA regulatory floodplain overlap")

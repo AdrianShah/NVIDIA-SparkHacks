@@ -56,9 +56,9 @@ export default function IncidentFeed({ incidents }: Props) {
               {inc.transcript.slice(0, 100)}{inc.transcript.length > 100 ? "…" : ""}
             </div>
             <div className="mt-1 flex gap-2" style={{ color: "var(--text-muted)" }}>
-              <span>Risk: {inc.ward_risk?.toFixed(0)}/100</span>
+              <span>Risk: {inc.ward_risk != null ? Number(inc.ward_risk).toFixed(0) : "—"}/100</span>
               <span>·</span>
-              <span>{inc.gps.lat.toFixed(4)}, {inc.gps.lng.toFixed(4)}</span>
+              <span>{Number(inc.gps.lat).toFixed(4)}, {Number(inc.gps.lng).toFixed(4)}</span>
             </div>
           </motion.div>
         ))}
