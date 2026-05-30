@@ -7,7 +7,7 @@ import WardBriefingPanel from "@/components/WardBriefingPanel";
 import IncidentFeed      from "@/components/IncidentFeed";
 import ReportModal       from "@/components/ReportModal";
 import ZoneDetailPanel   from "@/components/ZoneDetailPanel";
-import type { WardFeature, IncidentMarker } from "@/components/MapView";
+import type { WardFeature, IncidentMarker, BuildingFeature } from "@/components/MapView";
 
 const MapView = dynamic(() => import("@/components/MapView"), {
   ssr:     false,
@@ -49,6 +49,7 @@ export default function Dashboard() {
   const isDark = theme === "dark";
 
   const [wardScores,   setWardScores]   = useState<WardFeature[]>(MOCK_WARDS);
+  const [buildings,    setBuildings]    = useState<BuildingFeature[]>([]);
   const [incidents,    setIncidents]    = useState<IncidentMarker[]>([]);
   const [allIncidents, setAllIncidents] = useState<any[]>([]);
   const [confirmed,    setConfirmed]    = useState(0);
@@ -91,8 +92,12 @@ export default function Dashboard() {
   useEffect(() => {
     fetch(`${API}/api/risk-map`)
       .then((r) => r.json())
-      .then((d) => { if (d.wards?.length) setWardScores(d.wards); /* else stay on MOCK_WARDS */ })
-      .catch(() => { /* network error — stay on MOCK_WARDS */ });
+      .then((d) => { if (d.wards?.length) setWardScores(d.wards); })
+      .catch(() => {});
+    fetch(`${API}/api/buildings`)
+      .then((r) => r.json())
+      .then((d) => { if (d.buildings?.length) setBuildings(d.buildings); })
+      .catch(() => {});
   }, []);
 
   // ── WebSocket ────────────────────────────────────────────────────────────────
@@ -205,7 +210,7 @@ export default function Dashboard() {
 
       {/* ── Map area ── */}
       <div style={{ flex: 1, position: "relative", minHeight: 0, minWidth: 0 }}>
-        <MapView wardScores={wardScores} incidents={incidents} onWardClick={setSelectedWard} isDark={isDark} />
+        <MapView wardScores={wardScores} buildings={buildings} incidents={incidents} onWardClick={setSelectedWard} isDark={isDark} />
 
         {selectedWard && <ZoneDetailPanel ward={selectedWard} onClose={() => setSelectedWard(null)} />}
 

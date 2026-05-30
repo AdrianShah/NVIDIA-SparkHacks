@@ -12,6 +12,16 @@ export interface WardFeature {
   in_flood_zone?: boolean;
   prior_311?:    number;
   watermain_age?: number;
+  construction?: boolean;
+}
+
+export interface BuildingFeature {
+  address: string;
+  score:   number;
+  ward:    string;
+  floors:  number;
+  lat:     number;
+  lng:     number;
 }
 
 export interface IncidentMarker {
@@ -24,6 +34,7 @@ export interface IncidentMarker {
 
 interface MapViewProps {
   wardScores:  WardFeature[];
+  buildings?:  BuildingFeature[];
   incidents:   IncidentMarker[];
   onWardClick: (ward: WardFeature) => void;
   isDark:      boolean;
@@ -35,7 +46,7 @@ const URGENCY_COLOR: Record<string, string> = {
   LOW:      "#22c55e",
 };
 
-export default function MapView({ wardScores, incidents, onWardClick, isDark }: MapViewProps) {
+export default function MapView({ wardScores, buildings = [], incidents, onWardClick, isDark }: MapViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef       = useRef<maplibregl.Map | null>(null);
   const markersRef   = useRef<maplibregl.Marker[]>([]);
@@ -108,6 +119,26 @@ export default function MapView({ wardScores, incidents, onWardClick, isDark }: 
     else map.once("load", update);
   }, [wardScores]);
 
+  // ── Building dots ────────────────────────────────────────────────────────────
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || buildings.length === 0) return;
+    const update = () => {
+      const src = map.getSource("buildings") as maplibregl.GeoJSONSource | undefined;
+      if (!src) return;
+      src.setData({
+        type: "FeatureCollection",
+        features: buildings.map((b) => ({
+          type:       "Feature" as const,
+          properties: { ...b },
+          geometry:   { type: "Point" as const, coordinates: [b.lng, b.lat] },
+        })),
+      });
+    };
+    if (map.isStyleLoaded()) update();
+    else map.once("load", update);
+  }, [buildings]);
+
   // ── Incident markers ─────────────────────────────────────────────────────────
   useEffect(() => {
     const map = mapRef.current;
@@ -146,48 +177,69 @@ function setupSources(map: maplibregl.Map) {
   if (!map.getSource("wards")) {
     map.addSource("wards", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
   }
+  if (!map.getSource("buildings")) {
+    map.addSource("buildings", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+  }
 }
 
 function setupLayers(map: maplibregl.Map) {
+  // Ward circles — large, shown at all zoom levels
   if (!map.getLayer("ward-fill")) {
     map.addLayer({
       id: "ward-fill", type: "circle", source: "wards",
       paint: {
-        "circle-radius": ["interpolate", ["linear"], ["zoom"], 9, 14, 13, 28],
-        "circle-color": [
-          "interpolate", ["linear"], ["get", "score"],
-          0,  "#22c55e",
-          40, "#eab308",
-          60, "#f97316",
-          80, "#ef4444",
-        ],
-        "circle-opacity": 0.5,
-        "circle-stroke-color": [
-          "interpolate", ["linear"], ["get", "score"],
-          0, "#22c55e", 40, "#eab308", 60, "#f97316", 80, "#ef4444",
-        ],
-        "circle-stroke-width": 1.5,
-        "circle-stroke-opacity": 0.9,
+        "circle-radius": ["interpolate", ["linear"], ["zoom"], 9, 18, 13, 40],
+        "circle-color": ["interpolate", ["linear"], ["get", "score"],
+          0, "#22c55e", 40, "#eab308", 60, "#f97316", 80, "#ef4444"],
+        "circle-opacity": 0.35,
+        "circle-stroke-color": ["interpolate", ["linear"], ["get", "score"],
+          0, "#22c55e", 40, "#eab308", 60, "#f97316", 80, "#ef4444"],
+        "circle-stroke-width": 2,
+        "circle-stroke-opacity": 0.85,
       },
     });
   }
 
+  // Ward label — shows at zoom 11+
   if (!map.getLayer("ward-label")) {
     map.addLayer({
       id: "ward-label", type: "symbol", source: "wards", minzoom: 11,
       layout: {
-        "text-field":      ["concat", ["get", "name"], "\n", ["to-string", ["get", "score"]], "/100"],
-        "text-size":       10,
-        "text-anchor":     "top",
-        "text-offset":     [0, 1.2],
-        "text-font":       ["Open Sans Regular", "Arial Unicode MS Regular"],
-        "text-max-width":  8,
+        "text-field":     ["concat", ["get", "name"], "\n", ["to-string", ["get", "score"]], "/100"],
+        "text-size":      10, "text-anchor": "top", "text-offset": [0, 1.4],
+        "text-font":      ["Open Sans Regular", "Arial Unicode MS Regular"],
+        "text-max-width": 8,
       },
+      paint: { "text-color": "#ffffff", "text-halo-color": "rgba(0,0,0,0.7)", "text-halo-width": 1.5 },
+    });
+  }
+
+  // Building dots — small, only visible at zoom 12+
+  if (!map.getLayer("building-dot")) {
+    map.addLayer({
+      id: "building-dot", type: "circle", source: "buildings", minzoom: 12,
       paint: {
-        "text-color":       "#ffffff",
-        "text-halo-color":  "rgba(0,0,0,0.7)",
-        "text-halo-width":  1.5,
+        "circle-radius": ["interpolate", ["linear"], ["zoom"], 12, 4, 16, 8],
+        "circle-color": ["interpolate", ["linear"], ["get", "score"],
+          0, "#ef4444", 35, "#f97316", 55, "#eab308", 69, "#facc15"],
+        "circle-opacity": 0.9,
+        "circle-stroke-color": "#000",
+        "circle-stroke-width": 0.5,
       },
+    });
+  }
+
+  // Building label — address + score, only at zoom 14+
+  if (!map.getLayer("building-label")) {
+    map.addLayer({
+      id: "building-label", type: "symbol", source: "buildings", minzoom: 14,
+      layout: {
+        "text-field":     ["concat", ["get", "address"], " — ", ["to-string", ["get", "score"]]],
+        "text-size":      9, "text-anchor": "left", "text-offset": [0.8, 0],
+        "text-font":      ["Open Sans Regular", "Arial Unicode MS Regular"],
+        "text-max-width": 14,
+      },
+      paint: { "text-color": "#fbbf24", "text-halo-color": "rgba(0,0,0,0.8)", "text-halo-width": 1 },
     });
   }
 }

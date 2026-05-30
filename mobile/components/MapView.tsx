@@ -12,6 +12,16 @@ export interface WardScore {
   in_flood_zone?: boolean;
   prior_311?:    number;
   watermain_age?: number;
+  construction?: boolean;
+}
+
+export interface BuildingPoint {
+  address: string;
+  score:   number;
+  ward:    string;
+  floors:  number;
+  lat:     number;
+  lng:     number;
 }
 
 export interface SpatialData {
@@ -26,6 +36,7 @@ export interface SpatialData {
 interface MapViewProps {
   gps:          { lat: number; lng: number };
   wardScores:   WardScore[];
+  buildings?:   BuildingPoint[];
   spatial?:     SpatialData | null;
   incidents?:   Array<{ lat: number; lng: number; urgency: string; transcript: string }>;
   isDark:       boolean;
@@ -41,7 +52,14 @@ const RISK_COLOR: Record<string, string> = {
   LOW:      "#22c55e",
 };
 
-export default function MapView({ gps, wardScores, spatial, incidents, isDark, isActive, urgency, onWardPress }: MapViewProps) {
+// Building compliance colour (red = failing, yellow = borderline)
+function buildingColor(score: number): string {
+  if (score < 35) return "#ef4444";
+  if (score < 55) return "#f97316";
+  return "#eab308";
+}
+
+export default function MapView({ gps, wardScores, buildings = [], spatial, incidents, isDark, isActive, urgency, onWardPress }: MapViewProps) {
   const mapRef = useRef<RNMapView>(null);
 
   const tileUrl = isDark
@@ -61,15 +79,15 @@ export default function MapView({ gps, wardScores, spatial, incidents, isDark, i
       {/* ── Ward risk zones ── */}
       {wardScores.map((ward) => {
         const color = RISK_COLOR[ward.risk_level];
-        const radius = ward.risk_level === "CRITICAL" ? 3500
-                     : ward.risk_level === "HIGH"     ? 2800
-                     : ward.risk_level === "ELEVATED" ? 2000 : 1400;
+        const radius = ward.risk_level === "CRITICAL" ? 2000
+                     : ward.risk_level === "HIGH"     ? 1600
+                     : ward.risk_level === "ELEVATED" ? 1200 : 900;
         return (
           <React.Fragment key={ward.id}>
             <Circle
               center={{ latitude: ward.lat, longitude: ward.lng }}
               radius={radius}
-              fillColor={`${color}33`}
+              fillColor={`${color}28`}
               strokeColor={color}
               strokeWidth={1.5}
             />
@@ -87,6 +105,7 @@ export default function MapView({ gps, wardScores, spatial, incidents, isDark, i
                   <Text style={[styles.calloutTitle, { color }]}>{ward.risk_level}</Text>
                   <Text style={styles.calloutName}>{ward.name}</Text>
                   <Text style={styles.calloutScore}>Risk: {ward.score.toFixed(0)}/100</Text>
+                  {ward.construction && <Text style={[styles.calloutScore, { color: "#f97316" }]}>⚠ Active construction</Text>}
                   <Text style={styles.calloutHint}>Tap for details →</Text>
                 </View>
               </Callout>
@@ -94,6 +113,27 @@ export default function MapView({ gps, wardScores, spatial, incidents, isDark, i
           </React.Fragment>
         );
       })}
+
+      {/* ── At-risk buildings (small dots) ── */}
+      {buildings.map((b, i) => (
+        <Marker
+          key={`b-${i}`}
+          coordinate={{ latitude: b.lat, longitude: b.lng }}
+          anchor={{ x: 0.5, y: 0.5 }}
+          tracksViewChanges={false}
+        >
+          <View style={[styles.buildingDot, { backgroundColor: buildingColor(b.score) }]} />
+          <Callout tooltip>
+            <View style={styles.callout}>
+              <Text style={[styles.calloutTitle, { color: buildingColor(b.score) }]}>
+                RentSafe: {b.score}/100
+              </Text>
+              <Text style={styles.calloutName} numberOfLines={2}>{b.address}</Text>
+              {b.floors > 0 && <Text style={styles.calloutScore}>{b.floors} floors</Text>}
+            </View>
+          </Callout>
+        </Marker>
+      ))}
 
       {/* ── User location ── */}
       <Marker coordinate={{ latitude: gps.lat, longitude: gps.lng }} anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={false}>
@@ -122,7 +162,7 @@ export default function MapView({ gps, wardScores, spatial, incidents, isDark, i
 
       {/* ── Past incident markers ── */}
       {incidents?.map((inc, i) => (
-        <Marker key={i} coordinate={{ latitude: inc.lat, longitude: inc.lng }} anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={false}>
+        <Marker key={`inc-${i}`} coordinate={{ latitude: inc.lat, longitude: inc.lng }} anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={false}>
           <View style={[styles.incidentDot, { backgroundColor: RISK_COLOR[inc.urgency] ?? "#f97316" }]} />
         </Marker>
       ))}
@@ -132,9 +172,10 @@ export default function MapView({ gps, wardScores, spatial, incidents, isDark, i
 
 const styles = StyleSheet.create({
   map:          { flex: 1 },
-  wardDot:      { width: 32, height: 32, borderRadius: 16, borderWidth: 2, alignItems: "center", justifyContent: "center", opacity: 0.9 },
+  wardDot:      { width: 30, height: 30, borderRadius: 15, borderWidth: 2, alignItems: "center", justifyContent: "center", opacity: 0.9 },
   wardScore:    { color: "#fff", fontSize: 9, fontFamily: "monospace", fontWeight: "700" },
-  callout:      { backgroundColor: "#0d1f2d", borderRadius: 8, padding: 10, borderWidth: 1, borderColor: "#134e4a", minWidth: 140 },
+  buildingDot:  { width: 8, height: 8, borderRadius: 4, borderWidth: 1, borderColor: "#00000066" },
+  callout:      { backgroundColor: "#0d1f2d", borderRadius: 8, padding: 10, borderWidth: 1, borderColor: "#134e4a", minWidth: 140, maxWidth: 200 },
   calloutTitle: { fontFamily: "monospace", fontSize: 11, fontWeight: "700" },
   calloutName:  { color: "#e5e7eb", fontFamily: "monospace", fontSize: 10, marginTop: 3 },
   calloutScore: { color: "#9ca3af", fontFamily: "monospace", fontSize: 10, marginTop: 2 },

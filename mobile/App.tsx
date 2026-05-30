@@ -8,7 +8,7 @@ import {
   StatusBar, StyleSheet, Text, TextInput, TouchableOpacity, View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import MapView, { WardScore, SpatialData } from "./components/MapView";
+import MapView, { WardScore, BuildingPoint, SpatialData } from "./components/MapView";
 import AgentCard, { NodeStatus } from "./components/AgentCard";
 import CameraCapture from "./components/CameraCapture";
 import DispatchReport from "./components/DispatchReport";
@@ -65,6 +65,7 @@ export default function App() {
   // ── State ─────────────────────────────────────────────────────────────────────
   const [gps, setGps]             = useState({ lat: 43.6532, lng: -79.3832 });
   const [wardScores, setWardScores] = useState<WardScore[]>(MOCK_WARDS);
+  const [buildings,  setBuildings]  = useState<BuildingPoint[]>([]);
   const [selectedWard, setSelectedWard] = useState<WardScore | null>(null);
   const [incidents, setIncidents]  = useState<any[]>([]);
   const [nodes, setNodes]          = useState<AgentNodeDef[]>(INITIAL_NODES);
@@ -103,9 +104,13 @@ export default function App() {
     const timer = setTimeout(() => ctrl.abort(), 4000); // 4s timeout
     fetch(`${API_URL}/api/risk-map`, { signal: ctrl.signal })
       .then((r) => r.json())
-      .then((d) => { if (d.wards?.length) setWardScores(d.wards); /* else stay on MOCK_WARDS */ })
-      .catch(() => { /* network error — stay on MOCK_WARDS */ })
+      .then((d) => { if (d.wards?.length) setWardScores(d.wards); })
+      .catch(() => {})
       .finally(() => clearTimeout(timer));
+    fetch(`${API_URL}/api/buildings`)
+      .then((r) => r.json())
+      .then((d) => { if (d.buildings?.length) setBuildings(d.buildings); })
+      .catch(() => {});
   }, []);
 
   // ── Submit incident ───────────────────────────────────────────────────────────
@@ -174,6 +179,7 @@ export default function App() {
         <MapView
           gps={gps}
           wardScores={wardScores}
+          buildings={buildings}
           spatial={spatial}
           incidents={incidents}
           isDark={isDark}

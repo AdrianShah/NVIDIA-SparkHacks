@@ -6,6 +6,8 @@ import pandas as pd
 
 from backend.data import toronto_loader
 
+_CONSTRUCTION_PATTERN = r"construction|demolition|excavat|build permit|hoarding|scaffold"
+
 _FLOOD_PATTERN = r"flood|water|drain|sewer|basement|storm"
 _RISK_LEVELS = (
     (75, "CRITICAL"),
@@ -50,6 +52,35 @@ def _ward_buildings(ward_id: int | None) -> pd.DataFrame:
     return buildings[ward_values == ward_id]
 
 
+def _ward_centroid(ward_id: int) -> tuple[float, float]:
+    """Compute centroid of a ward from mean building coordinates."""
+    buildings = toronto_loader._buildings_gdf
+    if buildings is None or buildings.empty:
+        return 43.6532, -79.3832
+    ward_rows = buildings[pd.to_numeric(buildings.get("WARD", pd.Series()), errors="coerce") == ward_id]
+    if ward_rows.empty:
+        return 43.6532, -79.3832
+    lats = pd.to_numeric(ward_rows.get("LATITUDE", pd.Series()), errors="coerce").dropna()
+    lngs = pd.to_numeric(ward_rows.get("LONGITUDE", pd.Series()), errors="coerce").dropna()
+    if lats.empty or lngs.empty:
+        return 43.6532, -79.3832
+    return float(lats.mean()), float(lngs.mean())
+
+
+def _active_construction(ward_id: int | None) -> bool:
+    """True if there are 311 construction complaints in this ward."""
+    df = toronto_loader._requests_df
+    if df is None or df.empty or "Service Request Type" not in df.columns:
+        return False
+    if ward_id is not None and "_ward_num" in df.columns:
+        df = df[df["_ward_num"] == ward_id]
+    return bool(
+        df["Service Request Type"].astype(str)
+        .str.contains(_CONSTRUCTION_PATTERN, case=False, na=False)
+        .any()
+    )
+
+
 def _ward_record(ward_id: int | None, floodplain: bool = False) -> dict[str, Any]:
     buildings = _ward_buildings(ward_id)
     scores = (
@@ -57,51 +88,102 @@ def _ward_record(ward_id: int | None, floodplain: bool = False) -> dict[str, Any
         if not buildings.empty and "CURRENT BUILDING EVAL SCORE" in buildings.columns
         else pd.Series(dtype=float)
     )
-    flood_311 = _flood_311_count(ward_id)
-    vulnerable_buildings = int((scores < 70).sum())
-    score = min(100.0, flood_311 * 3.0 + vulnerable_buildings * 1.5 + (25.0 if floodplain else 0.0))
+    flood_311    = _flood_311_count(ward_id)
+    vuln_count   = int((scores < 70).sum())
+    construction = _active_construction(ward_id)
+    score = min(100.0,
+        flood_311 * 3.0
+        + vuln_count * 1.5
+        + (25.0 if floodplain else 0.0)
+        + (8.0 if construction else 0.0)
+    )
+    risk_level = _level(score)
+
     signals = []
     if floodplain:
         signals.append("TRCA regulatory floodplain overlap")
     if flood_311:
-        signals.append(f"{flood_311} flood, drainage, or sewer-related 311 requests")
-    if vulnerable_buildings:
-        signals.append(f"{vulnerable_buildings} RentSafeTO buildings with evaluation score below 70")
+        signals.append(f"{flood_311} flood/drainage 311 requests")
+    if vuln_count:
+        signals.append(f"{vuln_count} buildings with RentSafeTO score < 70")
+    if construction:
+        signals.append("Active construction reported via 311")
     if not signals:
-        signals.append("No elevated local signals in loaded Toronto datasets")
+        signals.append("No elevated risk signals in loaded datasets")
+
+    # Ward name from buildings WARDNAME column
+    ward_name = _ward_name(ward_id)
+    if not buildings.empty and "WARDNAME" in buildings.columns:
+        name_val = buildings["WARDNAME"].dropna().iloc[0] if not buildings.empty else None
+        if name_val:
+            ward_name = str(name_val)
+
+    lat, lng = _ward_centroid(ward_id) if ward_id is not None else (43.6532, -79.3832)
+
     return {
-        "ward_id": str(ward_id) if ward_id is not None else "unknown",
-        "ward_name": _ward_name(ward_id),
-        "score": round(score, 1),
-        "level": _level(score),
-        "signals": signals,
-        "data_scope": "ward-level fallback derived from loaded Toronto datasets",
+        "id":           str(ward_id) if ward_id is not None else "unknown",
+        "name":         ward_name,
+        "score":        round(score, 1),
+        "risk_level":   risk_level,
+        "lat":          round(lat, 6),
+        "lng":          round(lng, 6),
+        "in_flood_zone": floodplain,
+        "prior_311":    flood_311,
+        "watermain_age": 0,
+        "construction": construction,
+        "signals":      signals,
     }
 
 
 def get_ward_risk(lat: float, lng: float, *, floodplain: bool = False) -> dict[str, Any]:
-    """Return a deterministic ward fallback until Person 4 provides polygon scoring."""
     ward_id = toronto_loader._ward_from_point(lat, lng)
     return _ward_record(ward_id, floodplain)
 
 
 def get_risk_map() -> dict[str, Any]:
-    """Return ranked ward risks from the currently loaded local datasets."""
+    """Return ranked ward risks with coordinates from real building data."""
     ward_ids: set[int] = set()
     buildings = toronto_loader._buildings_gdf
-    requests = toronto_loader._requests_df
+    requests  = toronto_loader._requests_df
     if buildings is not None and not buildings.empty and "WARD" in buildings.columns:
         ward_ids.update(
-            int(value) for value in pd.to_numeric(buildings["WARD"], errors="coerce").dropna().unique()
+            int(v) for v in pd.to_numeric(buildings["WARD"], errors="coerce").dropna().unique()
         )
     if requests is not None and not requests.empty and "_ward_num" in requests.columns:
-        ward_ids.update(int(value) for value in requests["_ward_num"].dropna().unique())
-    wards = sorted((_ward_record(ward_id) for ward_id in ward_ids), key=lambda item: item["score"], reverse=True)
-    return {
-        "wards": wards,
-        "scoring_mode": "local-deterministic-fallback",
-        "data_scope": "Ward-level predictions use loaded 311 and RentSafeTO records. Person 4 can replace this adapter with polygon scoring.",
-    }
+        ward_ids.update(int(v) for v in requests["_ward_num"].dropna().unique())
+    wards = sorted(
+        (_ward_record(wid) for wid in ward_ids),
+        key=lambda w: w["score"], reverse=True
+    )
+    return {"wards": wards}
+
+
+def get_at_risk_buildings() -> list[dict[str, Any]]:
+    """Return individual RentSafeTO buildings with compliance < 70 for map display."""
+    buildings = toronto_loader._buildings_gdf
+    if buildings is None or buildings.empty:
+        return []
+    result = []
+    for _, row in buildings.iterrows():
+        try:
+            lat  = float(row.get("LATITUDE")  or 0)
+            lng  = float(row.get("LONGITUDE") or 0)
+            if not lat or not lng:
+                continue
+            score = float(row.get("CURRENT BUILDING EVAL SCORE") or 0)
+            if score <= 0 or score >= 70:
+                continue
+            result.append({
+                "address": str(row.get("SITE ADDRESS", "Unknown")),
+                "score":   round(score, 1),
+                "ward":    str(row.get("WARD", "")),
+                "floors":  int(row.get("CONFIRMED STOREYS") or 0),
+                "lat":     round(lat, 6),
+                "lng":     round(lng, 6),
+            })
+        except (TypeError, ValueError):
+            continue
+    return sorted(result, key=lambda b: b["score"])[:400]
 
 
 def score_incident(

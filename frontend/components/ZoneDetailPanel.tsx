@@ -47,8 +47,8 @@ export default function ZoneDetailPanel({ ward, onClose }: Props) {
     {
       icon:    <AlertTriangle className="w-3.5 h-3.5" />,
       label:   "Active Construction",
-      value:   "Check building permits",
-      flagged: false,
+      value:   (ward as any).construction ? "YES — 311 reports confirm" : "None detected",
+      flagged: !!(ward as any).construction,
     },
     {
       icon:    <Flame className="w-3.5 h-3.5" />,

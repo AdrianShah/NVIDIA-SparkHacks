@@ -521,17 +521,14 @@ async def process_incident(req: IncidentRequest):
 @app.get("/api/risk-map")
 @app.post("/api/risk-map")
 async def risk_map():
-    result = get_risk_map()
-    if MOCK_MODE and not result["wards"]:
-        result["wards"] = [{
-            "ward_id": "14",
-            "ward_name": "Toronto-Danforth",
-            "score": 82.0,
-            "level": "CRITICAL",
-            "signals": ["Mock predicted flood corridor for frontend integration"],
-            "data_scope": "stable mock contract",
-        }]
-    return result
+    return get_risk_map()
+
+
+@app.get("/api/buildings")
+async def buildings_endpoint():
+    """Individual at-risk RentSafeTO buildings for fine-grained map display."""
+    from backend.data.delation_risk import get_at_risk_buildings
+    return {"buildings": get_at_risk_buildings()}
 
 
 @app.get("/api/environmental-risk")
