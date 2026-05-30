@@ -6,6 +6,8 @@ frontend requests enter here, STT/TTS adapters are called here, and the
 LangGraph engine is treated as an importable black box.
 """
 import asyncio
+import base64
+import binascii
 import datetime
 import io
 import json
@@ -61,6 +63,7 @@ PCM_CHANNELS = 1
 PCM_SAMPLE_WIDTH_BYTES = 2
 PCM_MAX_SECONDS = 30
 PCM_MAX_BYTES = PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * PCM_MAX_SECONDS
+SUPPORTED_AUDIO_FORMATS = {"pcm_s16le", "m4a", "caf", "webm", "3gp"}
 
 
 class IncidentRequest(BaseModel):
@@ -157,11 +160,14 @@ app.add_middleware(
 )
 
 
-def transcribe_audio(pcm_bytes: bytes) -> str:
-    if _whisper_model is None or not pcm_bytes:
+def transcribe_audio(audio_bytes: bytes, audio_format: str = "pcm_s16le") -> str:
+    if _whisper_model is None or not audio_bytes:
         return ""
     try:
-        audio = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        if audio_format == "pcm_s16le":
+            audio = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        else:
+            audio = io.BytesIO(audio_bytes)
         segments, _ = _whisper_model.transcribe(audio, beam_size=5, language="en")
         return " ".join(seg.text.strip() for seg in segments)
     except Exception as exc:
@@ -287,7 +293,7 @@ def _event(node: str, status: TelemetryStatus, data: Optional[dict[str, Any]] = 
     return TelemetryEvent(node=node, status=status, timestamp=_timestamp(), data=data).model_dump(exclude_none=True)
 
 
-async def _commit_audio_buffer(websocket: WebSocket, audio_buffer: bytearray) -> str:
+async def _commit_audio_buffer(websocket: WebSocket, audio_buffer: bytearray, audio_format: str) -> str:
     audio_bytes = bytes(audio_buffer)
     audio_buffer.clear()
 
@@ -298,7 +304,7 @@ async def _commit_audio_buffer(websocket: WebSocket, audio_buffer: bytearray) ->
         return ""
 
     await websocket.send_json(_event("stt", TelemetryStatus.active, {"audio_bytes": len(audio_bytes)}))
-    transcript = await asyncio.to_thread(transcribe_audio, audio_bytes)
+    transcript = await asyncio.to_thread(transcribe_audio, audio_bytes, audio_format)
     await websocket.send_json(
         _event(
             "stt",
@@ -306,6 +312,7 @@ async def _commit_audio_buffer(websocket: WebSocket, audio_buffer: bytearray) ->
             {
                 "transcript": transcript,
                 "audio_bytes": len(audio_bytes),
+                "audio_format": audio_format,
                 "used_fallback": not bool(transcript),
             },
         )
@@ -365,6 +372,7 @@ async def websocket_stream(websocket: WebSocket):
     logger.info("WebSocket client connected")
     audio_buffer = bytearray()
     audio_transcript = ""
+    audio_format = "pcm_s16le"
 
     try:
         while True:
@@ -388,12 +396,34 @@ async def websocket_stream(websocket: WebSocket):
                 )
                 continue
 
+            if data.get("type") == "audio_start":
+                requested_format = str(data.get("format", "pcm_s16le")).lower()
+                if requested_format not in SUPPORTED_AUDIO_FORMATS:
+                    await websocket.send_json(
+                        _event("stt", TelemetryStatus.error, {"detail": f"unsupported audio format: {requested_format}"})
+                    )
+                    continue
+                audio_buffer.clear()
+                audio_format = requested_format
+                continue
+
+            if data.get("type") == "audio_chunk":
+                try:
+                    pcm_bytes = base64.b64decode(str(data.get("data", "")), validate=True)
+                except (binascii.Error, ValueError):
+                    await websocket.send_json(
+                        _event("stt", TelemetryStatus.error, {"detail": "invalid base64 audio chunk"})
+                    )
+                    continue
+                _append_audio_chunk(audio_buffer, pcm_bytes)
+                continue
+
             if data.get("type") == "audio_commit":
-                audio_transcript = await _commit_audio_buffer(websocket, audio_buffer)
+                audio_transcript = await _commit_audio_buffer(websocket, audio_buffer, audio_format)
                 continue
 
             if data.get("audio_commit"):
-                audio_transcript = await _commit_audio_buffer(websocket, audio_buffer)
+                audio_transcript = await _commit_audio_buffer(websocket, audio_buffer, audio_format)
 
             req = IncidentRequest(
                 transcript=_select_transcript(data.get("transcript"), audio_transcript),

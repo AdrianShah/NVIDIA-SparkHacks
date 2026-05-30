@@ -69,7 +69,7 @@ Response:
 { "node": "vision", "status": "active", "timestamp": "2026-05-29T21:05:33.412Z" }
 ```
 
-The same WebSocket also accepts live speech audio. Send raw mono PCM chunks as binary frames, then send an `audio_commit` JSON control frame:
+The same WebSocket also accepts live speech audio. Raw stream clients can send mono PCM chunks as binary frames, then send an `audio_commit` JSON control frame:
 
 ```json
 { "type": "audio_commit" }
@@ -98,6 +98,21 @@ The gateway responds with STT telemetry:
 ```
 
 Send the usual incident JSON frame after `audio_commit`. If its `transcript` is blank or a generic fallback message, the gateway injects the latest Whisper transcript into Person 3's AgentState. An explicit typed transcript still wins. Existing JSON-only clients continue to work unchanged.
+
+Expo mobile records `.m4a` containers. Before uploading the recording bytes, send:
+
+```json
+{ "type": "audio_start", "format": "m4a" }
+```
+
+Mobile then sends a base64 chunk followed by the same commit frame:
+
+```json
+{ "type": "audio_chunk", "data": "<base64 m4a bytes>" }
+{ "type": "audio_commit" }
+```
+
+The gateway also supports `caf`, `webm`, and `3gp` containers. Faster-Whisper decodes declared containers before transcription. The default format remains `pcm_s16le` for clients that stream raw PCM.
 
 `POST /api/synthesize` accepts `{ "text": "..." }` and returns `audio/wav`. If Kokoro is unavailable, the gateway returns a short valid WAV tone so frontend playback can still be tested.
 

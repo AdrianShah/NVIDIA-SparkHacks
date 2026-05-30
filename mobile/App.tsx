@@ -18,8 +18,8 @@ import DispatchReport from "./components/DispatchReport";
 import MapView from "./components/MapView";
 import type { SpatialData } from "./components/MapView";
 
-const API_URL = "http://10.10.53.17:8080";
-const WS_URL  = "ws://10.10.53.17:8080/ws/stream";
+const API_URL = process.env.EXPO_PUBLIC_API_URL ?? "http://localhost:8080";
+const WS_URL  = process.env.EXPO_PUBLIC_WS_URL ?? `${API_URL.replace(/^http/, "ws")}/ws/stream`;
 
 type UrgencyLevel = "LOW" | "HIGH" | "CRITICAL";
 
@@ -39,6 +39,13 @@ const INITIAL_NODES: AgentNodeDef[] = [
 
 const SCREEN_HEIGHT = Dimensions.get("window").height;
 
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
+  return globalThis.btoa(binary);
+}
+
 export default function App() {
   const [isActive, setIsActive]         = useState(false);
   const [gps, setGps]                   = useState({ lat: 43.6532, lng: -79.3832 });
@@ -48,11 +55,13 @@ export default function App() {
   const [spatial, setSpatial]           = useState<SpatialData | null>(null);
   const [urgency, setUrgency]           = useState<UrgencyLevel>("LOW");
   const [isProcessing, setIsProcessing] = useState(false);
+  const [audioStatus, setAudioStatus]   = useState("MIC IDLE");
 
   const currentFrameRef = useRef<string | null>(null);
   const isProcessingRef = useRef(false);
   const wsRef           = useRef<WebSocket | null>(null);
   const pollRef         = useRef<ReturnType<typeof setInterval> | null>(null);
+  const recordingRef    = useRef<Audio.Recording | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -71,12 +80,74 @@ export default function App() {
       prev.map((n) => (n.name === name ? { ...n, status, detail } : n))
     );
 
+  const startAudioRecording = useCallback(async () => {
+    if (recordingRef.current) return;
+    try {
+      const permission = await Audio.requestPermissionsAsync();
+      if (!permission.granted) {
+        setAudioStatus("MIC DENIED");
+        return;
+      }
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+      const { recording } = await Audio.Recording.createAsync(
+        Audio.RecordingOptionsPresets.HIGH_QUALITY
+      );
+      recordingRef.current = recording;
+      setAudioStatus("MIC RECORDING");
+    } catch {
+      setAudioStatus("MIC UNAVAILABLE");
+    }
+  }, []);
+
+  const stopAudioRecordingAndUpload = useCallback(async (ws: WebSocket) => {
+    const recording = recordingRef.current;
+    recordingRef.current = null;
+    if (!recording) return;
+
+    try {
+      setAudioStatus("MIC UPLOADING");
+      await recording.stopAndUnloadAsync();
+      const uri = recording.getURI();
+      if (!uri) return;
+
+      const b64 = await FileSystem.readAsStringAsync(uri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      ws.send(JSON.stringify({ type: "audio_start", format: "m4a" }));
+      ws.send(JSON.stringify({ type: "audio_chunk", data: b64 }));
+      ws.send(JSON.stringify({ type: "audio_commit" }));
+      await FileSystem.deleteAsync(uri, { idempotent: true });
+    } catch {
+      setAudioStatus("MIC UPLOAD FAILED");
+    }
+  }, []);
+
+  const stopAudioRecording = useCallback(async () => {
+    const recording = recordingRef.current;
+    recordingRef.current = null;
+    if (!recording) return;
+    try {
+      await recording.stopAndUnloadAsync();
+      const uri = recording.getURI();
+      if (uri) await FileSystem.deleteAsync(uri, { idempotent: true });
+    } catch {}
+    setAudioStatus("MIC IDLE");
+  }, []);
+
   const setupWebSocket = useCallback(() => {
     try {
       const ws = new WebSocket(WS_URL);
       ws.onopen    = () => { wsRef.current = ws; };
       ws.onmessage = (event) => {
         const { node, status, data: nodeData } = JSON.parse(event.data);
+        if (node === "stt") {
+          if (status === "active") setAudioStatus("MIC TRANSCRIBING");
+          else if (status === "error") setAudioStatus("MIC FALLBACK");
+          else setAudioStatus(nodeData?.used_fallback ? "MIC FALLBACK" : "MIC READY");
+        }
         if (node && status) {
           let detail = "";
           if (node === "vision" && nodeData?.vision_analysis)
@@ -137,22 +208,25 @@ export default function App() {
     }
   }, [gps]);
 
-  const sendIncident = useCallback(() => {
+  const sendIncident = useCallback(async () => {
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
       setIsProcessing(true);
       resetNodes();
+      await stopAudioRecordingAndUpload(ws);
       ws.send(JSON.stringify({ transcript: "Emergency incident reported", frame_b64: currentFrameRef.current, gps }));
+      await startAudioRecording();
     } else {
       resetNodes();
       processIncident();
     }
-  }, [gps, processIncident]);
+  }, [gps, processIncident, startAudioRecording, stopAudioRecordingAndUpload]);
 
-  const startIncident = () => {
+  const startIncident = async () => {
     setIsActive(true);
     setReport("");
     resetNodes();
+    await startAudioRecording();
     setupWebSocket();
     const id = setInterval(() => {
       if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
@@ -163,11 +237,12 @@ export default function App() {
     setTimeout(() => { if (currentFrameRef.current) sendIncident(); }, 3000);
   };
 
-  const stopIncident = () => {
+  const stopIncident = async () => {
     setIsActive(false);
     wsRef.current?.close();
     wsRef.current = null;
     if (pollRef.current) clearInterval(pollRef.current);
+    await stopAudioRecording();
     resetNodes();
   };
 
@@ -179,8 +254,8 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: report.slice(0, 500) }),
       });
-      const b64 = await res.text();
-      const uri = FileSystem.cacheDirectory + "dispatch.mp3";
+      const b64 = arrayBufferToBase64(await res.arrayBuffer());
+      const uri = (FileSystem.cacheDirectory ?? FileSystem.documentDirectory ?? "") + "dispatch.wav";
       await FileSystem.writeAsStringAsync(uri, b64, { encoding: FileSystem.EncodingType.Base64 });
       const { sound } = await Audio.Sound.createAsync({ uri });
       await sound.playAsync();
@@ -225,7 +300,10 @@ export default function App() {
             <Text style={styles.title}>CIVICVOX-OMNI</Text>
             <Text style={styles.subtitle}>Edge Emergency Intelligence · Toronto</Text>
           </View>
-          <Text style={styles.hwLabel}>NVIDIA GB10</Text>
+          <View>
+            <Text style={styles.hwLabel}>NVIDIA GB10</Text>
+            <Text style={styles.micLabel}>{audioStatus}</Text>
+          </View>
         </View>
 
         <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
@@ -320,6 +398,7 @@ const styles = StyleSheet.create({
   title:         { color: "#2dd4bf", fontFamily: "monospace", fontWeight: "700", fontSize: 14, letterSpacing: 3 },
   subtitle:      { color: "#374151", fontFamily: "monospace", fontSize: 9, marginTop: 2 },
   hwLabel:       { color: "#374151", fontFamily: "monospace", fontSize: 9 },
+  micLabel:      { color: "#14b8a6", fontFamily: "monospace", fontSize: 8, marginTop: 2, textAlign: "right" },
 
   scroll:        { flex: 1, paddingHorizontal: 12 },
   sectionLabel:  { color: "#374151", fontFamily: "monospace", fontSize: 9, letterSpacing: 2, marginTop: 12, marginBottom: 6 },

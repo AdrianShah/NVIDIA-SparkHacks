@@ -1,3 +1,5 @@
+import base64
+
 from fastapi.testclient import TestClient
 
 from backend import server
@@ -111,7 +113,7 @@ def test_audio_transcript_replaces_default_but_not_explicit_transcript():
 
 
 def test_websocket_audio_commit_emits_stt_transcript(monkeypatch):
-    monkeypatch.setattr(server, "transcribe_audio", lambda pcm_bytes: "Basement flooding")
+    monkeypatch.setattr(server, "transcribe_audio", lambda audio_bytes, audio_format: "Basement flooding")
 
     with _client() as client:
         with client.websocket_connect("/ws/stream") as websocket:
@@ -125,6 +127,7 @@ def test_websocket_audio_commit_emits_stt_transcript(monkeypatch):
     assert complete["node"] == "stt"
     assert complete["status"] == "complete"
     assert complete["data"]["transcript"] == "Basement flooding"
+    assert complete["data"]["audio_format"] == "pcm_s16le"
     assert complete["data"]["used_fallback"] is False
 
 
@@ -140,7 +143,7 @@ def test_websocket_audio_commit_without_audio_emits_error():
 
 
 def test_websocket_audio_commit_without_whisper_uses_transcript_fallback(monkeypatch):
-    monkeypatch.setattr(server, "transcribe_audio", lambda pcm_bytes: "")
+    monkeypatch.setattr(server, "transcribe_audio", lambda audio_bytes, audio_format: "")
 
     with _client() as client:
         with client.websocket_connect("/ws/stream") as websocket:
@@ -153,6 +156,82 @@ def test_websocket_audio_commit_without_whisper_uses_transcript_fallback(monkeyp
     assert complete["status"] == "complete"
     assert complete["data"]["transcript"] == ""
     assert complete["data"]["used_fallback"] is True
+
+
+def test_websocket_m4a_audio_commit_preserves_declared_format(monkeypatch):
+    received = {}
+
+    def transcribe(audio_bytes, audio_format):
+        received["audio_bytes"] = audio_bytes
+        received["audio_format"] = audio_format
+        return "Smoke on the second floor"
+
+    monkeypatch.setattr(server, "transcribe_audio", transcribe)
+
+    with _client() as client:
+        with client.websocket_connect("/ws/stream") as websocket:
+            websocket.send_json({"type": "audio_start", "format": "m4a"})
+            websocket.send_bytes(b"mock-m4a-container")
+            websocket.send_json({"type": "audio_commit"})
+            websocket.receive_json()
+            complete = websocket.receive_json()
+
+    assert received == {
+        "audio_bytes": b"mock-m4a-container",
+        "audio_format": "m4a",
+    }
+    assert complete["data"]["audio_format"] == "m4a"
+    assert complete["data"]["transcript"] == "Smoke on the second floor"
+
+
+def test_websocket_base64_audio_chunk_reaches_transcriber(monkeypatch):
+    received = {}
+
+    def transcribe(audio_bytes, audio_format):
+        received["audio_bytes"] = audio_bytes
+        received["audio_format"] = audio_format
+        return "Gas leak reported"
+
+    monkeypatch.setattr(server, "transcribe_audio", transcribe)
+
+    with _client() as client:
+        with client.websocket_connect("/ws/stream") as websocket:
+            websocket.send_json({"type": "audio_start", "format": "m4a"})
+            websocket.send_json({
+                "type": "audio_chunk",
+                "data": base64.b64encode(b"mock-m4a-container").decode("ascii"),
+            })
+            websocket.send_json({"type": "audio_commit"})
+            websocket.receive_json()
+            complete = websocket.receive_json()
+
+    assert received == {
+        "audio_bytes": b"mock-m4a-container",
+        "audio_format": "m4a",
+    }
+    assert complete["data"]["transcript"] == "Gas leak reported"
+
+
+def test_websocket_rejects_invalid_base64_audio_chunk():
+    with _client() as client:
+        with client.websocket_connect("/ws/stream") as websocket:
+            websocket.send_json({"type": "audio_chunk", "data": "%not-base64%"})
+            event = websocket.receive_json()
+
+    assert event["node"] == "stt"
+    assert event["status"] == "error"
+    assert event["data"]["detail"] == "invalid base64 audio chunk"
+
+
+def test_websocket_rejects_unsupported_audio_format():
+    with _client() as client:
+        with client.websocket_connect("/ws/stream") as websocket:
+            websocket.send_json({"type": "audio_start", "format": "mp3"})
+            event = websocket.receive_json()
+
+    assert event["node"] == "stt"
+    assert event["status"] == "error"
+    assert event["data"]["detail"] == "unsupported audio format: mp3"
 
 
 def test_websocket_mock_mode_emits_telemetry_events():
