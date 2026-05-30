@@ -4,6 +4,7 @@ Builds R-tree spatial indices for sub-millisecond nearest-neighbour queries.
 All geometries are projected to NAD83 / UTM Zone 17N (EPSG:2958) for accurate
 metre-based distance calculations.
 """
+import json
 import logging
 import os
 from pathlib import Path
@@ -11,7 +12,7 @@ from pathlib import Path
 import geopandas as gpd
 import pandas as pd
 from pyproj import Transformer
-from shapely.geometry import Point
+from shapely.geometry import Point, shape
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,24 @@ def _point_utm(lat: float, lng: float) -> Point:
 
 def _empty_gdf() -> gpd.GeoDataFrame:
     return gpd.GeoDataFrame(geometry=gpd.GeoSeries([], crs=TARGET_CRS))
+
+
+def _read_geodataframe(path: Path) -> gpd.GeoDataFrame:
+    """Read GeoJSON or Toronto CKAN CSV dumps with a GeoJSON geometry column."""
+    try:
+        gdf = gpd.read_file(path)
+        if len(gdf) > 0:
+            return gdf.to_crs(TARGET_CRS)
+    except Exception as exc:
+        logger.debug("read_file failed for %s: %s", path.name, exc)
+
+    df = pd.read_csv(path, low_memory=False)
+    if "geometry" not in df.columns:
+        raise ValueError(f"No geometry column in {path.name}")
+
+    geoms = [shape(json.loads(g)) if pd.notna(g) else None for g in df["geometry"]]
+    gdf = gpd.GeoDataFrame(df, geometry=geoms, crs="EPSG:4326")
+    return gdf.dropna(subset=["geometry"]).to_crs(TARGET_CRS)
 
 
 def _df_with_coords_to_gdf(df: pd.DataFrame) -> gpd.GeoDataFrame:
@@ -63,7 +82,7 @@ def load_all() -> None:
     # ── Fire Hydrants ─────────────────────────────────────────────────────────
     hydrants_path = DATA_DIR / "fire-hydrants.geojson"
     if hydrants_path.exists():
-        _hydrants_gdf = gpd.read_file(hydrants_path).to_crs(TARGET_CRS)
+        _hydrants_gdf = _read_geodataframe(hydrants_path)
         _ = _hydrants_gdf.sindex  # pre-build R-tree index
         logger.info("Loaded %d fire hydrants", len(_hydrants_gdf))
     else:
@@ -89,7 +108,7 @@ def load_all() -> None:
     # ── Street Centreline (large — optional) ──────────────────────────────────
     streets_path = DATA_DIR / "toronto-centreline.geojson"
     if streets_path.exists():
-        _streets_gdf = gpd.read_file(streets_path).to_crs(TARGET_CRS)
+        _streets_gdf = _read_geodataframe(streets_path)
         logger.info("Loaded %d street segments", len(_streets_gdf))
     else:
         logger.info("toronto-centreline.geojson not found — street lookup disabled")
@@ -97,8 +116,12 @@ def load_all() -> None:
     # ── 311 Service Requests ──────────────────────────────────────────────────
     requests_path = DATA_DIR / "311-service-requests.csv"
     if requests_path.exists():
-        _requests_df = pd.read_csv(requests_path, low_memory=False)
-        logger.info("Loaded %d 311 service requests", len(_requests_df))
+        try:
+            _requests_df = pd.read_csv(requests_path, low_memory=False, on_bad_lines="skip")
+            logger.info("Loaded %d 311 service requests", len(_requests_df))
+        except Exception as exc:
+            logger.warning("Could not load 311 CSV: %s", exc)
+            _requests_df = None
 
 
 def get_closest_hydrants(lat: float, lng: float, n: int = 3) -> list[dict]:
@@ -126,11 +149,18 @@ def get_closest_hydrants(lat: float, lng: float, n: int = 3) -> list[dict]:
             "id": str(row.get("OBJECTID", row.get("ASSET_ID", str(row_idx)))),
             "distance_meters": round(float(dist), 1),
             "status": str(row.get("STATUS", row.get("HYDRANT_STATUS", "Operational"))),
-            "address": str(row.get("ADDRESS", row.get("STREET_NAME", ""))),
+            "address": str(row.get("LOCDESC", row.get("ADDRESS", row.get("STREET_NAME", "")))),
             "lat": round(h_lat, 6),
             "lng": round(h_lng, 6),
         })
     return results
+
+
+def _row_val(row: pd.Series, *keys: str, default=""):
+    for key in keys:
+        if key in row.index and pd.notna(row[key]):
+            return row[key]
+    return default
 
 
 def get_building_specs(lat: float, lng: float) -> dict:
@@ -150,14 +180,28 @@ def get_building_specs(lat: float, lng: float) -> dict:
     b_lng, b_lat = _to_wgs84.transform(row.geometry.x, row.geometry.y)
 
     return {
-        "address": str(row.get("SITE_ADDRESS", row.get("ADDRESS", "Unknown"))),
+        "address": str(_row_val(row, "SITE ADDRESS", "SITE_ADDRESS", "ADDRESS", default="Unknown")),
         "distance_meters": round(float(dist), 1),
-        "floors": int(row.get("CONFIRMED_STOREYS", row.get("STOREYS", 0)) or 0),
-        "units": int(row.get("CONFIRMED_UNITS", row.get("UNITS", 0)) or 0),
-        "score": float(row.get("SCORE", row.get("EVALUATION_SCORE", 0)) or 0),
-        "year_built": int(row.get("YEAR_BUILT", 0) or 0),
-        "property_type": str(row.get("PROPERTY_TYPE", "")),
-        "contact": str(row.get("PROPERTY_MANAGER", row.get("CURRENT_OWNER", "Toronto Housing"))),
+        "floors": int(_row_val(row, "CONFIRMED STOREYS", "CONFIRMED_STOREYS", "STOREYS", default=0) or 0),
+        "units": int(_row_val(row, "CONFIRMED UNITS", "CONFIRMED_UNITS", "UNITS", default=0) or 0),
+        "score": float(
+            _row_val(
+                row,
+                "CURRENT BUILDING EVAL SCORE",
+                "SCORE",
+                "EVALUATION_SCORE",
+                default=0,
+            )
+            or 0
+        ),
+        "year_built": int(_row_val(row, "YEAR BUILT", "YEAR_BUILT", default=0) or 0),
+        "property_type": str(_row_val(row, "PROPERTY TYPE", "PROPERTY_TYPE", default="")),
+        "contact": str(
+            _row_val(row, "PROPERTY_MANAGER", "CURRENT_OWNER", default="Toronto Housing")
+        ),
+        "last_inspection": str(
+            _row_val(row, "EVALUATION COMPLETED ON", "LAST_INSPECTION", default="")
+        ),
         "lat": round(b_lat, 6),
         "lng": round(b_lng, 6),
     }
