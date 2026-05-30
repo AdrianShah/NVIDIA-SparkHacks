@@ -1,0 +1,40 @@
+{
+  "expo": {
+    "name": "CivicVox Omni",
+    "slug": "civicvox-omni",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "CivicVox uses the camera to capture incident footage for AI analysis.",
+        "NSLocationWhenInUseUsageDescription": "CivicVox uses your location to pin the incident on the map and find nearby hydrants.",
+        "NSMicrophoneUsageDescription": "CivicVox uses the microphone for voice dispatch."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#050F14",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.RECORD_AUDIO"
+      ],
+      "predictiveBackGestureEnabled": false
+    },
+    "plugins": [
+      ["expo-camera", { "cameraPermission": "CivicVox uses the camera to capture incident footage." }],
+      ["expo-location", { "locationWhenInUsePermission": "CivicVox uses your location to map the incident." }]
+    ],
+    "web": {
+      "favicon": "./assets/favicon.png"
+    }
+  }
+}
