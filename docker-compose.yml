@@ -1,0 +1,20 @@
+version: "3.9"
+
+# Optional: containerise the FastAPI backend only.
+# The frontend runs with `npm run dev` on the host.
+# The LLM inference server (NIM/vLLM) runs separately on the GB10.
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "8080:8080"
+    environment:
+      - LOCAL_LLM_URL=${LOCAL_LLM_URL:-http://host.docker.internal:8000/v1}
+      - LOCAL_LLM_MODEL=${LOCAL_LLM_MODEL:-meta/llama-3.2-11b-vision-instruct}
+      - DATA_DIR=/app/backend/data
+    volumes:
+      - ./backend/data:/app/backend/data:ro
+    restart: unless-stopped

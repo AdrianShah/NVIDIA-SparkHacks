@@ -1,0 +1,42 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #050F14;
+  --teal: #00D1B2;
+}
+
+body {
+  background-color: var(--bg);
+  color: #e5e7eb;
+  overflow: hidden;
+}
+
+/* Mapbox GL CSS is imported in MapView.tsx */
+
+/* Thin scrollbar */
+::-webkit-scrollbar {
+  width: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #134e4a;
+  border-radius: 2px;
+}
+
+/* Mapbox popup dark theme */
+.mapboxgl-popup-content {
+  background: #0d1f2d;
+  color: #e5e7eb;
+  border: 1px solid #134e4a;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-family: ui-monospace, monospace;
+}
+.mapboxgl-popup-tip {
+  border-top-color: #0d1f2d !important;
+}

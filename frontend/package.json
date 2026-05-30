@@ -1,0 +1,28 @@
+{
+  "name": "civicvox-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "next": "14.2.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "mapbox-gl": "^3.5.2",
+    "framer-motion": "^11.3.0",
+    "lucide-react": "^0.414.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@types/mapbox-gl": "^3.1.0",
+    "typescript": "^5.5.0",
+    "tailwindcss": "^3.4.6",
+    "postcss": "^8.4.39",
+    "autoprefixer": "^10.4.19"
+  }
+}
