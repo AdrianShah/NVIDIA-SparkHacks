@@ -266,7 +266,7 @@ export default function Dashboard() {
                 alt="Delation"
                 width={40}
                 height={40}
-                style={{ mixBlendMode: "screen", filter: "drop-shadow(0 0 3px rgba(59,130,246,0.7))", flexShrink: 0 }}
+                style={{ mixBlendMode: "screen", filter: "drop-shadow(0 0 3px rgba(59,130,246,0.7))", flexShrink: 0, borderRadius: "50%", background: "rgba(255,255,255,0.08)" }}
               />
               <div style={{ display: "flex", flexDirection: "column", justifyContent: "center" }}>
                 <h1 style={{ fontWeight: 700, fontSize: 14, letterSpacing: "0.05em", color: "var(--text)", margin: 0, lineHeight: 1.2 }}>Delation</h1>
