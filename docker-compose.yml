@@ -15,6 +15,7 @@ services:
       - LOCAL_LLM_URL=${LOCAL_LLM_URL:-http://host.docker.internal:8000/v1}
       - LOCAL_LLM_MODEL=${LOCAL_LLM_MODEL:-meta/llama-3.2-11b-vision-instruct}
       - DATA_DIR=/app/backend/data
+      - MOCK_MODE=${MOCK_MODE:-false}
     volumes:
       - ./backend/data:/app/backend/data:ro
     restart: unless-stopped
