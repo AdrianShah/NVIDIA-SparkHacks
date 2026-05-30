@@ -22,6 +22,7 @@ Expected handoff URLs:
 
 - Health: `http://localhost:8080/api/health`
 - Incident: `http://localhost:8080/api/incident`
+- Environmental risk: `http://localhost:8080/api/environmental-risk?lat=43.6532&lng=-79.3832`
 - Telemetry: `ws://localhost:8080/ws/stream`
 - TTS: `http://localhost:8080/api/synthesize`
 
@@ -115,6 +116,22 @@ Mobile then sends a base64 chunk followed by the same commit frame:
 The gateway also supports `caf`, `webm`, and `3gp` containers. Faster-Whisper decodes declared containers before transcription. The default format remains `pcm_s16le` for clients that stream raw PCM.
 
 `POST /api/synthesize` accepts `{ "text": "..." }` and returns `audio/wav`. If Kokoro is unavailable, the gateway returns a short valid WAV tone so frontend playback can still be tested.
+
+`GET /api/environmental-risk?lat=43.6532&lng=-79.3832` returns:
+
+- Regulatory floodplain exposure from TRCA's public `Floodline_TRCA_Polygon` ArcGIS service.
+- Official active weather alerts from Environment and Climate Change Canada MSC GeoMet.
+- Supplemental current rain, wind, humidity, and temperature conditions from Open-Meteo.
+
+Each upstream feed is cached independently. TRCA point checks refresh hourly by default, while alerts and current conditions refresh every five minutes. If an upstream service is temporarily unreachable, the gateway serves the last successful response with `"stale": true`, or reports `"available": false` if no cached response exists. Environmental lookups never block `/api/incident`.
+
+The refresh intervals are configurable without code changes:
+
+```bash
+TRCA_FLOOD_CACHE_TTL_SECONDS=3600
+WEATHER_CACHE_TTL_SECONDS=300
+ENVIRONMENTAL_RISK_TIMEOUT_SECONDS=4
+```
 
 ## Live Integration
 

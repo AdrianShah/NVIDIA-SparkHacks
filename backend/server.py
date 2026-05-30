@@ -22,13 +22,14 @@ from typing import Any, Optional
 
 import numpy as np
 import uvicorn
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field, field_validator
 
 from backend.agents.civic_vox_graph import AgentState, civic_vox_engine
+from backend.data.environmental_risk import get_environmental_risk
 from backend.data import toronto_loader
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(name)s  %(message)s")
@@ -367,6 +368,14 @@ async def process_incident(req: IncidentRequest):
         raise HTTPException(status_code=503, detail="agent engine unavailable") from exc
 
     return _result_to_response(result)
+
+
+@app.get("/api/environmental-risk")
+async def environmental_risk(
+    lat: float = Query(..., ge=-90, le=90),
+    lng: float = Query(..., ge=-180, le=180),
+):
+    return await get_environmental_risk(lat, lng)
 
 
 @app.post("/api/synthesize")
