@@ -1,5 +1,5 @@
-import { Audio, Video, ResizeMode } from "expo-av";
 import { CameraView, useCameraPermissions } from "expo-camera";
+import { useAudioRecorder, AudioModule, RecordingPresets } from "expo-audio";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Location from "expo-location";
 import React, { useCallback, useEffect, useRef, useState } from "react";
@@ -78,7 +78,6 @@ export default function App() {
 
   const currentFrameRef  = useRef<string | null>(null);
   const isProcessingRef  = useRef(false);
-  const recordingRef     = useRef<Audio.Recording | null>(null);
   const watchIdRef       = useRef<Location.LocationSubscription | null>(null);
 
   // ── Live GPS ──────────────────────────────────────────────────────────────────
@@ -107,13 +106,6 @@ export default function App() {
       .then((d) => { if (d.wards?.length) setWardScores(d.wards); })
       .catch(() => {}) // stay on MOCK_WARDS
       .finally(() => clearTimeout(timer));
-  }, []);
-
-  const stopRecording = useCallback(async () => {
-    const rec = recordingRef.current;
-    recordingRef.current = null;
-    if (!rec) return;
-    try { await rec.stopAndUnloadAsync(); } catch {}
   }, []);
 
   // ── Submit incident ───────────────────────────────────────────────────────────
@@ -169,7 +161,6 @@ export default function App() {
 
   const handleReportSubmit = async (transcript: string, frameB64: string) => {
     setShowReportModal(false);
-    await stopRecording();
     currentFrameRef.current = frameB64 || currentFrameRef.current;
     await submitIncident(transcript || "Emergency incident reported at this location");
   };
@@ -368,7 +359,6 @@ export default function App() {
 }
 
 // ── Report sheet ─────────────────────────────────────────────────────────────
-type VideoState = "idle" | "recording" | "paused" | "preview" | "kept";
 type PhotoState = "idle" | "preview" | "kept";
 
 function ReportIncidentSheet({ theme, gps, onSubmit, onCancel }: {
@@ -377,31 +367,22 @@ function ReportIncidentSheet({ theme, gps, onSubmit, onCancel }: {
   onSubmit: (transcript: string, frameB64: string) => void;
   onCancel: () => void;
 }) {
-  const [text, setText]           = useState("");
-  const [camMode, setCamMode]     = useState<"photo" | "video">("photo");
-  const [photoState, setPhotoState] = useState<PhotoState>("idle");
-  const [photoUri, setPhotoUri]   = useState<string | null>(null);
-  const [videoState, setVideoState] = useState<VideoState>("idle");
-  const [videoUri, setVideoUri]   = useState<string | null>(null);
-  const [videoSecs, setVideoSecs] = useState(0);
-  const [micActive, setMicActive] = useState(false);
-  const [micSecs, setMicSecs]     = useState(0);
+  const [text, setText]               = useState("");
+  const [photoState, setPhotoState]   = useState<PhotoState>("idle");
+  const [photoUri, setPhotoUri]       = useState<string | null>(null);
+  const [micActive, setMicActive]     = useState(false);
+  const [micSecs, setMicSecs]         = useState(0);
   const [transcribing, setTranscribing] = useState(false);
 
   const [permission] = useCameraPermissions();
-  const cameraRef     = useRef<CameraView>(null);
-  const frameB64Ref   = useRef<string>("");
-  const chunkAudioRef = useRef<Audio.Recording | null>(null);
-  const videoTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const micTimerRef   = useRef<ReturnType<typeof setInterval> | null>(null);
-  const chunkTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const cameraRef   = useRef<CameraView>(null);
+  const frameB64Ref = useRef<string>("");
+  const micTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const chunkTimer  = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fmt = (s: number) =>
     `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
-
-  const clearVideoTimer = () => {
-    if (videoTimerRef.current) { clearInterval(videoTimerRef.current); videoTimerRef.current = null; }
-  };
 
   // ── 1. PHOTO ─────────────────────────────────────────────────────────────────
   const takePhoto = async () => {
@@ -418,48 +399,7 @@ function ReportIncidentSheet({ theme, gps, onSubmit, onCancel }: {
   const keepPhoto   = () => setPhotoState("kept");
   const retakePhoto = () => { setPhotoUri(null); frameB64Ref.current = ""; setPhotoState("idle"); };
 
-  // ── 2. VIDEO ──────────────────────────────────────────────────────────────────
-  const startVideoRec = async () => {
-    setVideoUri(null);
-    setVideoSecs(0);
-    setVideoState("recording");
-    videoTimerRef.current = setInterval(() => setVideoSecs(s => s + 1), 1000);
-    try {
-      const result = await cameraRef.current?.recordAsync({ maxDuration: 120 });
-      clearVideoTimer();
-      if (result?.uri) {
-        setVideoUri(result.uri);
-        setVideoState("preview");
-        // Grab a still frame for the AI submission
-        try {
-          const p = await cameraRef.current?.takePictureAsync({ base64: true, quality: 0.6 });
-          if (p?.base64) frameB64Ref.current = p.base64;
-        } catch {}
-      } else {
-        setVideoState("idle");
-      }
-    } catch { clearVideoTimer(); setVideoState("idle"); }
-  };
-
-  const pauseVideoRec = () => {
-    // Stop recording → goes to paused (timer frozen, no preview yet)
-    cameraRef.current?.stopRecording();
-    clearVideoTimer();
-    setVideoState("paused");
-  };
-
-  const resumeVideoRec = () => startVideoRec();   // new segment, same UX
-
-  const stopVideoRec = () => {
-    cameraRef.current?.stopRecording();
-    clearVideoTimer();
-    // recordAsync promise resolves → sets preview
-  };
-
-  const keepVideo   = () => setVideoState("kept");
-  const redoVideo   = () => { setVideoUri(null); frameB64Ref.current = ""; setVideoState("idle"); };
-
-  // ── 3. SPEECH → real-time transcript ─────────────────────────────────────────
+  // ── 2. SPEECH (expo-audio, 5-second chunks → backend Whisper) ────────────────
   const transcribeChunk = async (uri: string) => {
     setTranscribing(true);
     try {
@@ -469,56 +409,46 @@ function ReportIncidentSheet({ theme, gps, onSubmit, onCancel }: {
         body: JSON.stringify({ audio_b64: b64, format: "m4a" }),
       });
       if (res.ok) {
-        const data = await res.json();
-        if (data.text?.trim())
-          setText(prev => prev ? `${prev} ${data.text.trim()}` : data.text.trim());
+        const { text: t } = await res.json();
+        if (t?.trim()) setText(prev => prev ? `${prev} ${t.trim()}` : t.trim());
       }
     } catch {}
     setTranscribing(false);
   };
 
   const startMic = async () => {
-    try {
-      await Audio.requestPermissionsAsync();
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
-      const { recording } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
-      chunkAudioRef.current = recording;
-      setMicActive(true); setMicSecs(0);
-      micTimerRef.current = setInterval(() => setMicSecs(s => s + 1), 1000);
-      // flush chunk every 5 s
-      chunkTimerRef.current = setInterval(async () => {
-        const cur = chunkAudioRef.current;
-        if (!cur) return;
-        try {
-          await cur.stopAndUnloadAsync();
-          const uri = cur.getURI();
-          if (uri) transcribeChunk(uri);
-          const { recording: next } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
-          chunkAudioRef.current = next;
-        } catch {}
-      }, 5000);
-    } catch {}
+    const status = await AudioModule.requestRecordingPermissionsAsync();
+    if (!status.granted) return;
+    await audioRecorder.prepareToRecordAsync();
+    audioRecorder.record();
+    setMicActive(true); setMicSecs(0);
+    micTimerRef.current = setInterval(() => setMicSecs(s => s + 1), 1000);
+    // Every 5 s stop → transcribe → restart
+    chunkTimer.current = setInterval(async () => {
+      try {
+        await audioRecorder.stop();
+        const uri = audioRecorder.uri;
+        if (uri) transcribeChunk(uri);
+        await audioRecorder.prepareToRecordAsync();
+        audioRecorder.record();
+      } catch {}
+    }, 5000);
   };
 
   const stopMic = async () => {
-    if (chunkTimerRef.current) { clearInterval(chunkTimerRef.current); chunkTimerRef.current = null; }
-    if (micTimerRef.current)   { clearInterval(micTimerRef.current);   micTimerRef.current   = null; }
-    const cur = chunkAudioRef.current;
-    chunkAudioRef.current = null;
-    if (cur) {
-      try {
-        await cur.stopAndUnloadAsync();
-        const uri = cur.getURI();
-        if (uri) await transcribeChunk(uri);
-      } catch {}
-    }
+    if (chunkTimer.current)  { clearInterval(chunkTimer.current);  chunkTimer.current  = null; }
+    if (micTimerRef.current) { clearInterval(micTimerRef.current); micTimerRef.current = null; }
+    try {
+      await audioRecorder.stop();
+      const uri = audioRecorder.uri;
+      if (uri) await transcribeChunk(uri);
+    } catch {}
     setMicActive(false);
   };
 
   // ── Submit ────────────────────────────────────────────────────────────────────
   const handleSubmit = async () => {
     if (micActive) await stopMic();
-    if (videoState === "recording") stopVideoRec();
     if (!frameB64Ref.current) {
       try {
         const p = await cameraRef.current?.takePictureAsync({ base64: true, quality: 0.6 });
@@ -528,11 +458,7 @@ function ReportIncidentSheet({ theme, gps, onSubmit, onCancel }: {
     onSubmit(text || "Incident reported", frameB64Ref.current);
   };
 
-  // Derived booleans
-  const showLiveCamera = (camMode === "photo" && photoState === "idle") ||
-                         (camMode === "video" && (videoState === "idle" || videoState === "recording" || videoState === "paused"));
-
-  const T = theme; // shorthand
+  const T = theme;
 
   return (
     <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={{ flex: 1, justifyContent: "flex-end" }}>
@@ -541,17 +467,15 @@ function ReportIncidentSheet({ theme, gps, onSubmit, onCancel }: {
         <View style={styles.zoneModalHandle} />
         <Text style={[styles.reportSheetTitle, { color: T.text }]}>Report an Incident</Text>
 
-        {/* ── Square media area ── */}
+        {/* ── Square camera area ── */}
         <View style={[styles.squareMedia, { borderColor: T.border }]}>
-
-          {/* PHOTO: idle / preview / kept */}
-          {camMode === "photo" && photoState !== "idle" && (
+          {photoState !== "idle" ? (
             <>
               <Image source={{ uri: photoUri! }} style={StyleSheet.absoluteFill} resizeMode="cover" />
               {photoState === "kept" && (
                 <View style={styles.keptBadge}><Text style={styles.keptText}>✓ Kept</Text></View>
               )}
-              {photoState !== "kept" && (
+              {photoState === "preview" && (
                 <View style={styles.previewActions}>
                   <TouchableOpacity onPress={retakePhoto} style={[styles.previewBtn, { backgroundColor: "rgba(0,0,0,0.75)" }]}>
                     <Text style={styles.previewBtnText}>🔄 Retake</Text>
@@ -567,110 +491,18 @@ function ReportIncidentSheet({ theme, gps, onSubmit, onCancel }: {
                 </TouchableOpacity>
               )}
             </>
-          )}
-
-          {/* VIDEO: preview / kept */}
-          {camMode === "video" && (videoState === "preview" || videoState === "kept") && (
+          ) : (
             <>
-              <Video source={{ uri: videoUri! }} style={StyleSheet.absoluteFill}
-                useNativeControls resizeMode={ResizeMode.COVER} shouldPlay={false} />
-              {videoState === "kept" && (
-                <View style={styles.keptBadge}><Text style={styles.keptText}>✓ Kept</Text></View>
-              )}
-              {videoState !== "kept" && (
-                <View style={styles.previewActions}>
-                  <TouchableOpacity onPress={redoVideo} style={[styles.previewBtn, { backgroundColor: "rgba(0,0,0,0.75)" }]}>
-                    <Text style={styles.previewBtnText}>🔄 Redo</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity onPress={keepVideo} style={[styles.previewBtn, { backgroundColor: "#22c55e" }]}>
-                    <Text style={styles.previewBtnText}>✓ Keep</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
-              {videoState === "kept" && (
-                <TouchableOpacity onPress={redoVideo} style={[styles.camActionBtn, { right: 8, bottom: 8, backgroundColor: "rgba(0,0,0,0.6)" }]}>
-                  <Text style={styles.camActionText}>🔄 Change</Text>
-                </TouchableOpacity>
-              )}
-            </>
-          )}
-
-          {/* LIVE CAMERA */}
-          {showLiveCamera && (
-            permission?.granted
-              ? <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" />
-              : <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
-                  <Text style={{ color: T.muted, fontFamily: "monospace", fontSize: 11 }}>Camera permission needed</Text>
-                </View>
-          )}
-
-          {/* Mode toggle (only when no media kept) */}
-          {showLiveCamera && videoState !== "recording" && (
-            <View style={styles.modeToggle}>
-              {(["photo", "video"] as const).map(m => (
-                <TouchableOpacity key={m} onPress={() => setCamMode(m)}
-                  style={{ paddingHorizontal: 14, paddingVertical: 4, borderRadius: 14,
-                    backgroundColor: camMode === m ? T.teal : "transparent" }}>
-                  <Text style={{ fontSize: 13, color: camMode === m ? "#fff" : "#9ca3af" }}>
-                    {m === "photo" ? "📷" : "🎥"}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          )}
-
-          {/* Photo: capture button */}
-          {showLiveCamera && camMode === "photo" && (
-            <TouchableOpacity onPress={takePhoto}
-              style={[styles.camActionBtn, { bottom: 10, right: 10, backgroundColor: "rgba(0,0,0,0.7)" }]}>
-              <Text style={styles.camActionText}>📷 Capture</Text>
-            </TouchableOpacity>
-          )}
-
-          {/* Video: idle → Record */}
-          {camMode === "video" && videoState === "idle" && (
-            <TouchableOpacity onPress={startVideoRec}
-              style={[styles.camActionBtn, { bottom: 10, right: 10, backgroundColor: "rgba(0,0,0,0.7)" }]}>
-              <Text style={styles.camActionText}>🎥 Record</Text>
-            </TouchableOpacity>
-          )}
-
-          {/* Video: recording → timer + Pause + Stop */}
-          {camMode === "video" && videoState === "recording" && (
-            <>
-              <View style={styles.recIndicator}>
-                <View style={styles.recDot} />
-                <Text style={styles.recTimer}>REC  {fmt(videoSecs)}</Text>
-              </View>
-              <View style={[styles.previewActions, { bottom: 10 }]}>
-                <TouchableOpacity onPress={pauseVideoRec}
-                  style={[styles.previewBtn, { backgroundColor: "rgba(0,0,0,0.75)" }]}>
-                  <Text style={styles.previewBtnText}>⏸ Pause</Text>
-                </TouchableOpacity>
-                <TouchableOpacity onPress={stopVideoRec}
-                  style={[styles.previewBtn, { backgroundColor: "#ef4444" }]}>
-                  <Text style={styles.previewBtnText}>⏹ Stop</Text>
-                </TouchableOpacity>
-              </View>
-            </>
-          )}
-
-          {/* Video: paused → timer frozen + Resume + Stop */}
-          {camMode === "video" && videoState === "paused" && (
-            <>
-              <View style={styles.recIndicator}>
-                <Text style={[styles.recTimer, { color: "#f97316" }]}>⏸ PAUSED  {fmt(videoSecs)}</Text>
-              </View>
-              <View style={[styles.previewActions, { bottom: 10 }]}>
-                <TouchableOpacity onPress={resumeVideoRec}
-                  style={[styles.previewBtn, { backgroundColor: T.teal }]}>
-                  <Text style={styles.previewBtnText}>▶ Resume</Text>
-                </TouchableOpacity>
-                <TouchableOpacity onPress={redoVideo}
-                  style={[styles.previewBtn, { backgroundColor: "rgba(0,0,0,0.75)" }]}>
-                  <Text style={styles.previewBtnText}>⏹ Discard</Text>
-                </TouchableOpacity>
-              </View>
+              {permission?.granted
+                ? <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" />
+                : <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+                    <Text style={{ color: T.muted, fontFamily: "monospace", fontSize: 11 }}>Camera permission needed</Text>
+                  </View>
+              }
+              <TouchableOpacity onPress={takePhoto}
+                style={[styles.camActionBtn, { bottom: 10, right: 10, backgroundColor: "rgba(0,0,0,0.7)" }]}>
+                <Text style={styles.camActionText}>📷 Capture</Text>
+              </TouchableOpacity>
             </>
           )}
         </View>
@@ -696,11 +528,7 @@ function ReportIncidentSheet({ theme, gps, onSubmit, onCancel }: {
           </TouchableOpacity>
         </View>
         <TextInput
-          style={[styles.textInputBox, {
-            backgroundColor: T.bgPanel,
-            borderColor: micActive ? T.teal : T.border,
-            color: T.text,
-          }]}
+          style={[styles.textInputBox, { backgroundColor: T.bgPanel, borderColor: micActive ? T.teal : T.border, color: T.text }]}
           placeholder={micActive ? "Listening… speak now" : "Describe what you see — flooding, pothole, fire…"}
           placeholderTextColor={T.muted}
           multiline numberOfLines={3}

@@ -30,8 +30,20 @@
       "predictiveBackGestureEnabled": false
     },
     "plugins": [
-      ["expo-camera", { "cameraPermission": "CivicVox uses the camera to capture incident footage." }],
-      ["expo-location", { "locationWhenInUsePermission": "CivicVox uses your location to map the incident." }]
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "CivicVox uses the camera to capture incident footage."
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "CivicVox uses your location to map the incident."
+        }
+      ],
+      "expo-video",
+      "expo-audio"
     ],
     "web": {
       "favicon": "./assets/favicon.png"
