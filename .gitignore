@@ -3,6 +3,19 @@ __pycache__/
 *.pyc
 .DS_Store
 
+# Node
+node_modules/
+package-lock.json
+
+# Next.js
+.next/
+frontend/next-env.d.ts
+
+# Env files
+.env
+.env.local
+mobile/.env
+
 # 311 download artifacts (canonical file is 311-service-requests.csv)
 backend/data/311-service-requests.zip
 backend/data/SR2026.csv

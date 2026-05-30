@@ -101,6 +101,7 @@ class SynthesizeRequest(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     mock_mode: bool
+    nvidia_stack: dict[str, Any]
     models_loaded: dict[str, bool]
     spatial_data: dict[str, int]
 
@@ -331,9 +332,17 @@ def _result_to_response(result: dict[str, Any]) -> IncidentResponse:
 
 @app.get("/api/health", response_model=HealthResponse)
 async def health():
+    from backend.data.toronto_loader import _RAPIDS_AVAILABLE
+    from backend.agents.civic_vox_graph import LOCAL_LLM_URL, LOCAL_LLM_MODEL
     return {
         "status": "ok",
         "mock_mode": MOCK_MODE,
+        "nvidia_stack": {
+            "nim_endpoint": LOCAL_LLM_URL,
+            "nim_model": LOCAL_LLM_MODEL,
+            "whisper_cuda": _whisper_model is not None,
+            "rapids_cuspatial": _RAPIDS_AVAILABLE,
+        },
         "models_loaded": {
             "whisper": _whisper_model is not None,
             "kokoro": _kokoro_model is not None,

@@ -1,7 +1,5 @@
 "use client";
-import { useEffect, useRef } from "react";
-import mapboxgl from "mapbox-gl";
-import "mapbox-gl/dist/mapbox-gl.css";
+import { useEffect, useRef, useState } from "react";
 
 export interface SpatialData {
   closest_hydrants?: Array<{
@@ -31,7 +29,7 @@ interface MapViewProps {
   isActive: boolean;
 }
 
-const TORONTO: [number, number] = [-79.3832, 43.6532];
+const TORONTO: [number, number] = [43.6532, -79.3832];
 
 const URGENCY_COLOR: Record<string, string> = {
   CRITICAL: "#ef4444",
@@ -39,112 +37,107 @@ const URGENCY_COLOR: Record<string, string> = {
   LOW: "#22c55e",
 };
 
+const URGENCY_RADIUS: Record<string, number> = {
+  CRITICAL: 300,
+  HIGH: 200,
+  LOW: 120,
+};
+
 export default function MapView({ gps, spatial, urgency, isActive }: MapViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<mapboxgl.Map | null>(null);
-  const incidentMarkerRef = useRef<mapboxgl.Marker | null>(null);
-  const hydrantMarkersRef = useRef<mapboxgl.Marker[]>([]);
-  const buildingMarkerRef = useRef<mapboxgl.Marker | null>(null);
+  const mapRef = useRef<any>(null);
+  const LRef = useRef<any>(null);
+  const incidentMarkerRef = useRef<any>(null);
+  const alertCircleRef = useRef<any>(null);
+  const hydrantMarkersRef = useRef<any[]>([]);
+  const buildingMarkerRef = useRef<any>(null);
+  const [mapReady, setMapReady] = useState(false);
 
-  // Initialise map once
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
 
-    mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN ?? "";
+    import("leaflet").then((mod) => {
+      const L = mod.default;
+      LRef.current = L;
 
-    const map = new mapboxgl.Map({
-      container: containerRef.current,
-      style: "mapbox://styles/mapbox/dark-v11",
-      center: TORONTO,
-      zoom: 13,
+      // Fix broken default icon paths in bundled environments
+      delete (L.Icon.Default.prototype as any)._getIconUrl;
+      L.Icon.Default.mergeOptions({
+        iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
+        iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
+        shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
+      });
+
+      const map = L.map(containerRef.current!, { zoomControl: true }).setView(TORONTO, 13);
+
+      L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+        attribution:
+          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>',
+        subdomains: "abcd",
+        maxZoom: 20,
+      }).addTo(map);
+
+      mapRef.current = map;
+      setMapReady(true);
     });
 
-    map.on("load", () => {
-      // Alert radius circle layer
-      map.addSource("alert-circle", {
-        type: "geojson",
-        data: { type: "FeatureCollection", features: [] },
-      });
-      map.addLayer({
-        id: "alert-fill",
-        type: "circle",
-        source: "alert-circle",
-        paint: {
-          "circle-radius": 0,
-          "circle-color": "#ef4444",
-          "circle-opacity": 0.12,
-          "circle-stroke-color": "#ef4444",
-          "circle-stroke-width": 1.5,
-          "circle-stroke-opacity": 0.5,
-        },
-      });
-    });
-
-    mapRef.current = map;
     return () => {
-      map.remove();
-      mapRef.current = null;
+      if (mapRef.current) {
+        mapRef.current.remove();
+        mapRef.current = null;
+      }
     };
   }, []);
 
   // Update incident marker + alert ring
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !map.isStyleLoaded()) return;
+    const L = LRef.current;
+    if (!map || !L) return;
 
     incidentMarkerRef.current?.remove();
+    alertCircleRef.current?.remove();
 
     if (!gps) return;
 
+    const color = URGENCY_COLOR[urgency ?? "HIGH"] ?? "#f97316";
+
     const el = document.createElement("div");
     el.style.cssText = `
-      width: 16px; height: 16px;
-      border-radius: 50%;
-      background: ${URGENCY_COLOR[urgency ?? "HIGH"] ?? "#f97316"};
-      border: 2px solid white;
-      box-shadow: 0 0 0 4px ${URGENCY_COLOR[urgency ?? "HIGH"] ?? "#f97316"}44;
+      width:16px; height:16px;
+      border-radius:50%;
+      background:${color};
+      border:2px solid white;
+      box-shadow:0 0 0 4px ${color}44;
+      ${isActive ? "animation:cv-pulse 1.2s ease-in-out infinite;" : ""}
     `;
-    if (isActive) {
-      el.style.animation = "mapboxgl-pin-pulse 1.2s ease-in-out infinite";
-    }
 
-    incidentMarkerRef.current = new mapboxgl.Marker({ element: el })
-      .setLngLat([gps.lng, gps.lat])
-      .setPopup(
-        new mapboxgl.Popup({ offset: 12 }).setHTML(
-          `<strong>INCIDENT</strong><br/>${gps.lat.toFixed(5)}, ${gps.lng.toFixed(5)}<br/>Urgency: ${urgency ?? "—"}`
-        )
+    incidentMarkerRef.current = L.marker([gps.lat, gps.lng], {
+      icon: L.divIcon({ html: el, className: "", iconSize: [16, 16], iconAnchor: [8, 8] }),
+    })
+      .bindPopup(
+        `<strong>INCIDENT</strong><br/>${gps.lat.toFixed(5)}, ${gps.lng.toFixed(5)}<br/>Urgency: ${urgency ?? "—"}`
       )
       .addTo(map);
 
-    map.flyTo({ center: [gps.lng, gps.lat], zoom: 15, speed: 1.4 });
+    const radius = URGENCY_RADIUS[urgency ?? "HIGH"] ?? 200;
+    alertCircleRef.current = L.circle([gps.lat, gps.lng], {
+      radius,
+      color,
+      fillColor: color,
+      fillOpacity: 0.12,
+      weight: 1.5,
+      opacity: 0.5,
+    }).addTo(map);
 
-    // Update alert radius layer (pixels — approximate 300 m at zoom 15)
-    const radiusPx = urgency === "CRITICAL" ? 90 : urgency === "HIGH" ? 60 : 35;
-    try {
-      const source = map.getSource("alert-circle") as mapboxgl.GeoJSONSource;
-      if (source) {
-        source.setData({
-          type: "FeatureCollection",
-          features: [
-            {
-              type: "Feature",
-              geometry: { type: "Point", coordinates: [gps.lng, gps.lat] },
-              properties: {},
-            },
-          ],
-        });
-        map.setPaintProperty("alert-fill", "circle-radius", radiusPx);
-        map.setPaintProperty("alert-fill", "circle-color", URGENCY_COLOR[urgency ?? "HIGH"] ?? "#ef4444");
-        map.setPaintProperty("alert-fill", "circle-stroke-color", URGENCY_COLOR[urgency ?? "HIGH"] ?? "#ef4444");
-      }
-    } catch {}
-  }, [gps, urgency, isActive]);
+    map.flyTo([gps.lat, gps.lng], 15);
+  }, [gps, urgency, isActive, mapReady]);
 
-  // Update hydrant markers
+  // Update hydrant + building markers
   useEffect(() => {
     const map = mapRef.current;
-    if (!map) return;
+    const L = LRef.current;
+    if (!map || !L) return;
 
     hydrantMarkersRef.current.forEach((m) => m.remove());
     hydrantMarkersRef.current = [];
@@ -152,43 +145,54 @@ export default function MapView({ gps, spatial, urgency, isActive }: MapViewProp
 
     if (!spatial) return;
 
-    // Hydrant markers (blue triangles)
     spatial.closest_hydrants?.forEach((h) => {
       if (!h.lat || !h.lng) return;
       const el = document.createElement("div");
       el.textContent = "▲";
-      el.style.cssText = "color:#60a5fa; font-size:18px; cursor:pointer; text-shadow:0 0 6px #1d4ed8;";
+      el.style.cssText =
+        "color:#60a5fa;font-size:18px;cursor:pointer;text-shadow:0 0 6px #1d4ed8;line-height:1;";
       el.title = `Hydrant #${h.id} · ${h.distance_meters} m`;
 
-      const marker = new mapboxgl.Marker({ element: el })
-        .setLngLat([h.lng, h.lat])
-        .setPopup(
-          new mapboxgl.Popup({ offset: 8 }).setHTML(
-            `<strong>Hydrant #${h.id}</strong><br/>Distance: ${h.distance_meters} m<br/>Status: ${h.status}<br/>${h.address}`
-          )
+      const marker = L.marker([h.lat, h.lng], {
+        icon: L.divIcon({ html: el, className: "", iconSize: [18, 18], iconAnchor: [9, 9] }),
+      })
+        .bindPopup(
+          `<strong>Hydrant #${h.id}</strong><br/>Distance: ${h.distance_meters} m<br/>Status: ${h.status}<br/>${h.address}`
         )
         .addTo(map);
 
       hydrantMarkersRef.current.push(marker);
     });
 
-    // Building marker (orange square)
     const b = spatial.building_specs;
     if (b?.lat && b?.lng) {
       const el = document.createElement("div");
       el.textContent = "■";
-      el.style.cssText = "color:#fb923c; font-size:16px; cursor:pointer; text-shadow:0 0 6px #ea580c;";
+      el.style.cssText =
+        "color:#fb923c;font-size:16px;cursor:pointer;text-shadow:0 0 6px #ea580c;line-height:1;";
 
-      buildingMarkerRef.current = new mapboxgl.Marker({ element: el })
-        .setLngLat([b.lng, b.lat])
-        .setPopup(
-          new mapboxgl.Popup({ offset: 8 }).setHTML(
-            `<strong>${b.address}</strong><br/>Floors: ${b.floors} · Units: ${b.units}<br/>Score: ${b.score} · Built: ${(b as any).year_built ?? "—"}`
-          )
+      buildingMarkerRef.current = L.marker([b.lat, b.lng], {
+        icon: L.divIcon({ html: el, className: "", iconSize: [16, 16], iconAnchor: [8, 8] }),
+      })
+        .bindPopup(
+          `<strong>${b.address}</strong><br/>Floors: ${b.floors} · Units: ${b.units}<br/>Score: ${b.score} · Built: ${(b as any).year_built ?? "—"}`
         )
         .addTo(map);
     }
-  }, [spatial]);
+  }, [spatial, mapReady]);
 
-  return <div ref={containerRef} className="w-full h-full" />;
+  return (
+    <>
+      <style>{`
+        @keyframes cv-pulse {
+          0%,100% { box-shadow:0 0 0 4px rgba(239,68,68,0.3); }
+          50%      { box-shadow:0 0 0 8px rgba(239,68,68,0.1); }
+        }
+        .leaflet-container { background:#1a1a2e; }
+        .leaflet-popup-content-wrapper { background:#1e1e2e; color:#e2e8f0; border:1px solid #334155; }
+        .leaflet-popup-tip { background:#1e1e2e; }
+      `}</style>
+      <div ref={containerRef} className="w-full h-full" />
+    </>
+  );
 }

@@ -226,7 +226,7 @@ export default function HomePage() {
         <MapView gps={gps} spatial={spatial} urgency={urgency} isActive={isActive} />
 
         {/* Camera overlay */}
-        <div className="absolute bottom-4 left-4 z-20">
+        <div className="absolute bottom-4 left-4 z-[1000]">
           <CameraCapture
             isActive={isActive}
             onFrame={(f) => { currentFrameRef.current = f; }}
@@ -236,14 +236,14 @@ export default function HomePage() {
 
         {/* Urgency badge */}
         {isActive && (
-          <div className={`absolute top-4 left-4 z-20 rounded border px-3 py-1.5 bg-black/70 backdrop-blur flex items-center gap-2 ${urgencyStyle}`}>
+          <div className={`absolute top-4 left-4 z-[1000] rounded border px-3 py-1.5 bg-black/70 backdrop-blur flex items-center gap-2 ${urgencyStyle}`}>
             <span className="w-2 h-2 rounded-full bg-current animate-pulse" />
             <span className="text-xs font-mono font-bold tracking-widest">{urgency} INCIDENT LIVE</span>
           </div>
         )}
 
         {/* Start / Stop button */}
-        <div className="absolute top-4 right-4 z-20 flex flex-col gap-2 items-end">
+        <div className="absolute top-4 right-4 z-[1000] flex flex-col gap-2 items-end">
           <button
             onClick={isActive ? stopIncident : startIncident}
             className={`px-5 py-2 rounded-lg font-mono font-bold text-sm tracking-wider transition-all shadow-lg ${

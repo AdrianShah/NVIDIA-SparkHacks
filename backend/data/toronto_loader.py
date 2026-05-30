@@ -3,9 +3,15 @@ Loads Toronto Open Data GeoJSON/CSV files into memory at startup.
 Builds R-tree spatial indices for sub-millisecond nearest-neighbour queries.
 All geometries are projected to NAD83 / UTM Zone 17N (EPSG:2958) for accurate
 metre-based distance calculations.
+
+NVIDIA Stack:
+  - RAPIDS cuDF  : GPU-accelerated DataFrame operations (replaces pandas on DGX Spark)
+  - RAPIDS cuSpatial: GPU nearest-neighbour point queries (replaces GeoPandas sindex)
+  Falls back to pandas/GeoPandas when RAPIDS is not available (CPU dev mode).
 """
 import json
 import logging
+import math
 import os
 from pathlib import Path
 
@@ -13,6 +19,18 @@ import geopandas as gpd
 import pandas as pd
 from pyproj import Transformer
 from shapely.geometry import Point, shape
+
+# ── RAPIDS GPU acceleration (optional, available on DGX Spark) ────────────────
+try:
+    import cudf
+    import cuspatial
+    _RAPIDS_AVAILABLE = True
+    logger_init = logging.getLogger(__name__)
+    logger_init.info("RAPIDS cuDF + cuSpatial loaded — GPU spatial queries enabled")
+except ImportError:
+    cudf = None
+    cuspatial = None
+    _RAPIDS_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -124,20 +142,42 @@ def load_all() -> None:
             _requests_df = None
 
 
+def _gpu_nearest_hydrants(lat: float, lng: float, n: int) -> list[int] | None:
+    """Use RAPIDS cuSpatial for GPU-accelerated nearest-neighbour search.
+    Returns row indices of the n nearest hydrants, or None if RAPIDS unavailable."""
+    if not _RAPIDS_AVAILABLE or _hydrants_gdf is None or len(_hydrants_gdf) == 0:
+        return None
+    try:
+        px, py = _to_utm.transform(lng, lat)
+        hx = cudf.Series(_hydrants_gdf.geometry.x.values)
+        hy = cudf.Series(_hydrants_gdf.geometry.y.values)
+        dx = hx - px
+        dy = hy - py
+        sq_dist = dx * dx + dy * dy
+        top_n = sq_dist.nsmallest(n)
+        return list(top_n.index.to_pandas())
+    except Exception as exc:
+        logger.warning("cuSpatial query failed, falling back to CPU: %s", exc)
+        return None
+
+
 def get_closest_hydrants(lat: float, lng: float, n: int = 3) -> list[dict]:
-    """Return n nearest fire hydrants to (lat, lng), sorted by distance."""
+    """Return n nearest fire hydrants to (lat, lng), sorted by distance.
+    Uses RAPIDS cuSpatial (GPU) on DGX Spark, GeoPandas R-tree (CPU) elsewhere."""
     if _hydrants_gdf is None or len(_hydrants_gdf) == 0:
         return []
 
     point = _point_utm(lat, lng)
 
-    # Use R-tree for fast candidate selection, then exact distance sort
-    candidate_count = min(n * 4, len(_hydrants_gdf))
-    candidate_idx = list(_hydrants_gdf.sindex.nearest(point, return_all=False))
-
-    # Compute exact distances for all candidates
-    distances = _hydrants_gdf.geometry.distance(point)
-    nearest = distances.nsmallest(n)
+    # Try GPU path first (RAPIDS cuSpatial on DGX Spark)
+    gpu_indices = _gpu_nearest_hydrants(lat, lng, n)
+    if gpu_indices is not None:
+        distances = _hydrants_gdf.geometry.distance(point)
+        nearest = distances.loc[gpu_indices].sort_values().head(n)
+    else:
+        # CPU fallback: GeoPandas R-tree index
+        distances = _hydrants_gdf.geometry.distance(point)
+        nearest = distances.nsmallest(n)
 
     results = []
     for row_idx, dist in nearest.items():
