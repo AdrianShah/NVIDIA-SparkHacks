@@ -13,7 +13,12 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
 
-from backend.data.toronto_loader import get_building_specs, get_closest_hydrants
+from backend.data.toronto_loader import (
+    get_311_history,
+    get_building_specs,
+    get_closest_hydrants,
+    get_nearest_road,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -136,11 +141,15 @@ def localizer_node(state: AgentState) -> dict:
 
     hydrants = get_closest_hydrants(lat, lng, n=3)
     building = get_building_specs(lat, lng)
+    road = get_nearest_road(lat, lng)
+    history_311 = get_311_history(lat, lng, limit=5)
 
     return {
         "spatial_data_results": {
             "closest_hydrants": hydrants,
             "building_specs": building,
+            "nearest_road": road,
+            "history_311": history_311,
             "query_location": {"lat": lat, "lng": lng},
         },
         "next_step": "compiler",

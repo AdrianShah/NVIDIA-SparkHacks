@@ -15,6 +15,7 @@ import logging
 import math
 import os
 import struct
+import time
 import wave
 from contextlib import asynccontextmanager
 from enum import Enum
@@ -22,13 +23,15 @@ from typing import Any, Optional
 
 import numpy as np
 import uvicorn
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field, field_validator
 
 from backend.agents.civic_vox_graph import AgentState, civic_vox_engine
+from backend.data.delation_risk import get_risk_map, get_ward_risk, score_incident
+from backend.data.environmental_risk import feed_cache_status, get_environmental_risk
 from backend.data import toronto_loader
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(name)s  %(message)s")
@@ -84,6 +87,12 @@ class IncidentResponse(BaseModel):
     urgency: str
     vision: dict[str, Any]
     spatial: dict[str, Any]
+    environmental_risk: dict[str, Any] = Field(default_factory=dict)
+    ward_risk: dict[str, Any] = Field(default_factory=dict)
+    compound_risk: dict[str, Any] = Field(default_factory=dict)
+    escalated: bool = False
+    escalation_reason: str = ""
+    performance: dict[str, Any] = Field(default_factory=dict)
 
 
 class SynthesizeRequest(BaseModel):
@@ -104,6 +113,8 @@ class HealthResponse(BaseModel):
     nvidia_stack: dict[str, Any]
     models_loaded: dict[str, bool]
     spatial_data: dict[str, int]
+    data_loaded: dict[str, bool]
+    external_feeds: dict[str, str]
 
 
 class TelemetryEvent(BaseModel):
@@ -111,6 +122,10 @@ class TelemetryEvent(BaseModel):
     status: TelemetryStatus
     timestamp: str
     data: Optional[dict[str, Any]] = None
+    latency_ms: Optional[float] = None
+    escalated: Optional[bool] = None
+    model: Optional[str] = None
+    compute_path: Optional[str] = None
 
 
 @asynccontextmanager
@@ -275,6 +290,35 @@ def _mock_incident_response() -> IncidentResponse:
     )
 
 
+def _mock_environmental_risk() -> dict[str, Any]:
+    return {
+        "query_location": {"lat": 43.6629, "lng": -79.3957},
+        "flood_risk": {
+            "available": True,
+            "in_regulatory_floodplain": True,
+            "source": "TRCA Floodline_TRCA_Polygon",
+            "checked_at": _timestamp(),
+            "stale": False,
+        },
+        "weather": {
+            "alerts": {
+                "available": True,
+                "alerts": [{"name": "Rainfall warning", "status": "active"}],
+                "source": "Environment and Climate Change Canada MSC GeoMet",
+                "checked_at": _timestamp(),
+                "stale": False,
+            },
+            "conditions": {
+                "available": True,
+                "current": {"precipitation": 4.2, "rain": 4.2, "wind_speed_10m": 18.0},
+                "source": "Open-Meteo supplemental current conditions",
+                "checked_at": _timestamp(),
+                "stale": False,
+            },
+        },
+    }
+
+
 def _mock_agent_update() -> dict[str, Any]:
     response = _mock_incident_response()
     return {
@@ -290,8 +334,93 @@ def _timestamp() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _event(node: str, status: TelemetryStatus, data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-    return TelemetryEvent(node=node, status=status, timestamp=_timestamp(), data=data).model_dump(exclude_none=True)
+def _event(
+    node: str,
+    status: TelemetryStatus,
+    data: Optional[dict[str, Any]] = None,
+    *,
+    latency_ms: Optional[float] = None,
+    escalated: Optional[bool] = None,
+    model: Optional[str] = None,
+    compute_path: Optional[str] = None,
+) -> dict[str, Any]:
+    return TelemetryEvent(
+        node=node,
+        status=status,
+        timestamp=_timestamp(),
+        data=data,
+        latency_ms=round(latency_ms, 2) if latency_ms is not None else None,
+        escalated=escalated,
+        model=model,
+        compute_path=compute_path,
+    ).model_dump(exclude_none=True)
+
+
+def _spatial_compute_path() -> str:
+    return "rapids-cudf" if toronto_loader._RAPIDS_AVAILABLE else "geopandas-cpu"
+
+
+def _configured_llm_model() -> str:
+    return os.environ.get("LOCAL_LLM_MODEL", "meta/llama-3.2-11b-vision-instruct")
+
+
+async def _environment_for_incident(req: IncidentRequest) -> dict[str, Any]:
+    if MOCK_MODE:
+        return _mock_environmental_risk()
+    try:
+        return await get_environmental_risk(req.gps.lat, req.gps.lng)
+    except Exception as exc:
+        logger.warning("Environmental enrichment unavailable: %s", exc)
+        return {
+            "query_location": {"lat": req.gps.lat, "lng": req.gps.lng},
+            "flood_risk": {"available": False, "error": "environmental enrichment unavailable"},
+            "weather": {},
+        }
+
+
+async def _enrich_response(
+    req: IncidentRequest,
+    response: IncidentResponse,
+    *,
+    started_at: Optional[float] = None,
+    agent_latency_ms: Optional[float] = None,
+) -> IncidentResponse:
+    environmental_started = time.perf_counter()
+    environmental = await _environment_for_incident(req)
+    environmental_latency_ms = (time.perf_counter() - environmental_started) * 1000
+    floodplain = bool(environmental.get("flood_risk", {}).get("in_regulatory_floodplain"))
+    if MOCK_MODE:
+        ward_risk = {
+            "ward_id": "14",
+            "ward_name": "Toronto-Danforth",
+            "score": 82.0,
+            "level": "CRITICAL",
+            "signals": ["Mock predicted flood corridor for frontend integration"],
+            "data_scope": "stable mock contract",
+        }
+    else:
+        ward_risk = get_ward_risk(req.gps.lat, req.gps.lng, floodplain=floodplain)
+    compound = score_incident(req.transcript, response.vision, response.spatial, environmental, ward_risk)
+    performance = {
+        "environmental_lookup_ms": round(environmental_latency_ms, 2),
+        "spatial_compute_path": _spatial_compute_path(),
+    }
+    if agent_latency_ms is not None:
+        performance["agent_pipeline_ms"] = round(agent_latency_ms, 2)
+    if started_at is not None:
+        performance["total_incident_ms"] = round((time.perf_counter() - started_at) * 1000, 2)
+    return response.model_copy(update={
+        "environmental_risk": environmental,
+        "ward_risk": ward_risk,
+        "compound_risk": {
+            "score": compound["score"],
+            "level": compound["level"],
+            "factors": compound["factors"],
+        },
+        "escalated": compound["escalated"],
+        "escalation_reason": compound["escalation_reason"],
+        "performance": performance,
+    })
 
 
 async def _commit_audio_buffer(websocket: WebSocket, audio_buffer: bytearray, audio_format: str) -> str:
@@ -305,7 +434,9 @@ async def _commit_audio_buffer(websocket: WebSocket, audio_buffer: bytearray, au
         return ""
 
     await websocket.send_json(_event("stt", TelemetryStatus.active, {"audio_bytes": len(audio_bytes)}))
+    started_at = time.perf_counter()
     transcript = await asyncio.to_thread(transcribe_audio, audio_bytes, audio_format)
+    latency_ms = (time.perf_counter() - started_at) * 1000
     await websocket.send_json(
         _event(
             "stt",
@@ -316,6 +447,8 @@ async def _commit_audio_buffer(websocket: WebSocket, audio_buffer: bytearray, au
                 "audio_format": audio_format,
                 "used_fallback": not bool(transcript),
             },
+            latency_ms=latency_ms,
+            model="faster-whisper-large-v3",
         )
     )
     return transcript
@@ -350,29 +483,74 @@ async def health():
         "spatial_data": {
             "hydrants": len(toronto_loader._hydrants_gdf) if toronto_loader._hydrants_gdf is not None else 0,
             "buildings": len(toronto_loader._buildings_gdf) if toronto_loader._buildings_gdf is not None else 0,
+            "streets": len(toronto_loader._streets_gdf) if toronto_loader._streets_gdf is not None else 0,
+            "311_requests": len(toronto_loader._requests_df) if toronto_loader._requests_df is not None else 0,
         },
+        "data_loaded": {
+            "hydrants": toronto_loader._hydrants_gdf is not None and len(toronto_loader._hydrants_gdf) > 0,
+            "buildings": toronto_loader._buildings_gdf is not None and len(toronto_loader._buildings_gdf) > 0,
+            "streets": toronto_loader._streets_gdf is not None and len(toronto_loader._streets_gdf) > 0,
+            "311_requests": toronto_loader._requests_df is not None and len(toronto_loader._requests_df) > 0,
+        },
+        "external_feeds": feed_cache_status(),
     }
 
 
 @app.post("/api/incident", response_model=IncidentResponse)
 async def process_incident(req: IncidentRequest):
+    started_at = time.perf_counter()
     if MOCK_MODE:
-        return _mock_incident_response()
+        return await _enrich_response(req, _mock_incident_response(), started_at=started_at)
 
     initial_state = _build_initial_state(req)
+    agent_started = time.perf_counter()
     try:
         result = await civic_vox_engine.ainvoke(initial_state)
     except Exception as exc:
         logger.exception("Agent engine failed")
         raise HTTPException(status_code=503, detail="agent engine unavailable") from exc
 
-    return _result_to_response(result)
+    return await _enrich_response(
+        req,
+        _result_to_response(result),
+        started_at=started_at,
+        agent_latency_ms=(time.perf_counter() - agent_started) * 1000,
+    )
+
+
+@app.get("/api/risk-map")
+@app.post("/api/risk-map")
+async def risk_map():
+    result = get_risk_map()
+    if MOCK_MODE and not result["wards"]:
+        result["wards"] = [{
+            "ward_id": "14",
+            "ward_name": "Toronto-Danforth",
+            "score": 82.0,
+            "level": "CRITICAL",
+            "signals": ["Mock predicted flood corridor for frontend integration"],
+            "data_scope": "stable mock contract",
+        }]
+    return result
+
+
+@app.get("/api/environmental-risk")
+async def environmental_risk(
+    lat: float = Query(..., ge=-90, le=90),
+    lng: float = Query(..., ge=-180, le=180),
+):
+    return await get_environmental_risk(lat, lng)
 
 
 @app.post("/api/synthesize")
 async def synthesize(req: SynthesizeRequest):
+    started_at = time.perf_counter()
     wav_bytes = synthesize_speech(req.text)
-    return Response(content=wav_bytes, media_type="audio/wav")
+    return Response(
+        content=wav_bytes,
+        media_type="audio/wav",
+        headers={"X-Latency-Ms": f"{(time.perf_counter() - started_at) * 1000:.2f}"},
+    )
 
 
 @app.websocket("/ws/stream")
@@ -445,6 +623,7 @@ async def websocket_stream(websocket: WebSocket):
 
             if MOCK_MODE:
                 mock_update = _mock_agent_update()
+                enriched = await _enrich_response(req, _mock_incident_response())
                 node_delays = [
                     ("orchestrator", 0.5, None),
                     ("vision", 1.0, {"vision_analysis": mock_update["vision_analysis"]}),
@@ -452,28 +631,95 @@ async def websocket_stream(websocket: WebSocket):
                     ("compiler", 1.2, {
                         "final_dispatch_report": mock_update["final_dispatch_report"],
                         "urgency_level": mock_update["urgency_level"],
+                        "ward_risk": enriched.ward_risk,
+                        "compound_risk": enriched.compound_risk,
+                        "environmental_risk": enriched.environmental_risk,
+                        "escalated": enriched.escalated,
+                        "escalation_reason": enriched.escalation_reason,
+                        "performance": enriched.performance,
                     }),
                 ]
                 for node, delay, node_data in node_delays:
                     await websocket.send_json(_event(node, TelemetryStatus.active))
+                    started_at = time.perf_counter()
                     await asyncio.sleep(delay)
-                    await websocket.send_json(_event(node, TelemetryStatus.complete, node_data))
+                    await websocket.send_json(
+                        _event(
+                            node,
+                            TelemetryStatus.complete,
+                            node_data,
+                            latency_ms=(time.perf_counter() - started_at) * 1000,
+                            escalated=enriched.escalated if node == "compiler" else None,
+                            compute_path=_spatial_compute_path() if node == "localizer" else None,
+                        )
+                    )
+                if enriched.escalated:
+                    await websocket.send_json(
+                        _event(
+                            "gateway",
+                            TelemetryStatus.complete,
+                            {
+                                "type": "prediction_confirmed",
+                                "ward_risk": enriched.ward_risk,
+                                "reason": enriched.escalation_reason,
+                            },
+                            escalated=True,
+                        )
+                    )
                 continue
 
             initial_state = _build_initial_state(req)
+            combined_result: dict[str, Any] = {}
+            previous_node_at = time.perf_counter()
             async for event in civic_vox_engine.astream(initial_state, stream_mode="updates"):
                 for node_name, node_output in event.items():
+                    latency_ms = (time.perf_counter() - previous_node_at) * 1000
+                    previous_node_at = time.perf_counter()
+                    combined_result.update(node_output)
                     await websocket.send_json(_event(node_name, TelemetryStatus.active))
+                    public_output = {
+                        k: v for k, v in node_output.items()
+                        if k not in ("messages", "video_frames_base64")
+                    }
+                    enriched = None
+                    if node_name == "compiler":
+                        enriched = await _enrich_response(req, _result_to_response(combined_result))
+                        public_output.update({
+                            "ward_risk": enriched.ward_risk,
+                            "compound_risk": enriched.compound_risk,
+                            "environmental_risk": enriched.environmental_risk,
+                            "escalated": enriched.escalated,
+                            "escalation_reason": enriched.escalation_reason,
+                            "performance": enriched.performance,
+                        })
                     await websocket.send_json(
                         _event(
                             node_name,
                             TelemetryStatus.complete,
-                            {
-                                k: v for k, v in node_output.items()
-                                if k not in ("messages", "video_frames_base64")
-                            },
+                            public_output,
+                            latency_ms=latency_ms,
+                            escalated=enriched.escalated if enriched else None,
+                            model=(
+                                _configured_llm_model()
+                                if node_name in ("orchestrator", "vision", "compiler")
+                                else None
+                            ),
+                            compute_path=_spatial_compute_path() if node_name == "localizer" else None,
                         )
                     )
+                    if enriched and enriched.escalated:
+                        await websocket.send_json(
+                            _event(
+                                "gateway",
+                                TelemetryStatus.complete,
+                                {
+                                    "type": "prediction_confirmed",
+                                    "ward_risk": enriched.ward_risk,
+                                    "reason": enriched.escalation_reason,
+                                },
+                                escalated=True,
+                            )
+                        )
 
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected")

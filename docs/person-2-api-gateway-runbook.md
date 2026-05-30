@@ -22,6 +22,8 @@ Expected handoff URLs:
 
 - Health: `http://localhost:8080/api/health`
 - Incident: `http://localhost:8080/api/incident`
+- Predictive ward risk map: `http://localhost:8080/api/risk-map`
+- Environmental risk: `http://localhost:8080/api/environmental-risk?lat=43.6532&lng=-79.3832`
 - Telemetry: `ws://localhost:8080/ws/stream`
 - TTS: `http://localhost:8080/api/synthesize`
 
@@ -116,6 +118,72 @@ The gateway also supports `caf`, `webm`, and `3gp` containers. Faster-Whisper de
 
 `POST /api/synthesize` accepts `{ "text": "..." }` and returns `audio/wav`. If Kokoro is unavailable, the gateway returns a short valid WAV tone so frontend playback can still be tested.
 
+`GET /api/environmental-risk?lat=43.6532&lng=-79.3832` returns:
+
+- Regulatory floodplain exposure from TRCA's public `Floodline_TRCA_Polygon` ArcGIS service.
+- Official active weather alerts from Environment and Climate Change Canada MSC GeoMet.
+- Supplemental current rain, wind, humidity, and temperature conditions from Open-Meteo.
+
+Each upstream feed is cached independently. TRCA point checks refresh hourly by default, while alerts and current conditions refresh every five minutes. If an upstream service is temporarily unreachable, the gateway serves the last successful response with `"stale": true`, or reports `"available": false` if no cached response exists. Environmental lookups never block `/api/incident`.
+
+The refresh intervals are configurable without code changes:
+
+```bash
+TRCA_FLOOD_CACHE_TTL_SECONDS=3600
+WEATHER_CACHE_TTL_SECONDS=300
+ENVIRONMENTAL_RISK_TIMEOUT_SECONDS=4
+```
+
+## Delation Additive Contracts
+
+`GET /api/risk-map` and `POST /api/risk-map` return ranked ward risk records:
+
+```json
+{
+  "wards": [
+    {
+      "ward_id": "14",
+      "ward_name": "Ward 14",
+      "score": 82.0,
+      "level": "CRITICAL",
+      "signals": ["12 flood, drainage, or sewer-related 311 requests"]
+    }
+  ],
+  "scoring_mode": "local-deterministic-fallback"
+}
+```
+
+The gateway fallback is intentionally deterministic and ward-level. It uses loaded 311 and RentSafeTO records so Person 5 can integrate immediately. Person 4 can replace the adapter with richer polygon scoring without changing the public contract.
+
+`POST /api/incident` preserves the original `report`, `urgency`, `vision`, and `spatial` fields and adds:
+
+```json
+{
+  "environmental_risk": {},
+  "ward_risk": {
+    "ward_id": "14",
+    "ward_name": "Toronto-Danforth",
+    "score": 82.0,
+    "level": "CRITICAL",
+    "signals": []
+  },
+  "compound_risk": {
+    "score": 91.0,
+    "level": "CRITICAL",
+    "factors": []
+  },
+  "escalated": true,
+  "escalation_reason": "Citizen flooding report confirms predicted risk in Toronto-Danforth",
+  "performance": {
+    "environmental_lookup_ms": 14.2,
+    "spatial_compute_path": "rapids-cudf",
+    "total_incident_ms": 810.4
+  }
+}
+```
+
+Completed WebSocket telemetry events include `latency_ms`. Localizer events expose `compute_path`, compiler events carry the Delation enrichment, and confirmed predictions emit a `gateway` event with `data.type: "prediction_confirmed"`.
+
 ## Live Integration
 
 Set `MOCK_MODE=false` once Person 1 and Person 3 are ready. On startup, the gateway attempts to load Toronto Open Data, Faster-Whisper, and Kokoro. Missing STT/TTS dependencies do not crash the server; the gateway logs a warning and continues so the demo can degrade gracefully.
@@ -123,5 +191,18 @@ Set `MOCK_MODE=false` once Person 1 and Person 3 are ready. On startup, the gate
 Run tests:
 
 ```bash
-pytest tests/test_gateway.py
+pytest tests
+```
+
+Run pre-demo checks and stable replay scenarios after starting the gateway:
+
+```bash
+python scripts/check_demo_ready.py
+python scripts/replay_demo.py
+```
+
+Container startup:
+
+```bash
+docker compose up --build backend
 ```

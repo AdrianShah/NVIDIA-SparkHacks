@@ -115,6 +115,14 @@ npm run dev
 | `LOCAL_LLM_URL` | `http://localhost:8000/v1` | OpenAI-compatible inference endpoint |
 | `LOCAL_LLM_MODEL` | `meta/llama-3.2-11b-vision-instruct` | Model name for chat/completions |
 | `DATA_DIR` | `./backend/data` | Path to Toronto Open Data files |
+| `TRCA_FLOOD_CACHE_TTL_SECONDS` | `3600` | Refresh interval for TRCA regulatory floodplain checks |
+| `WEATHER_CACHE_TTL_SECONDS` | `300` | Refresh interval for live alerts and current conditions |
+
+### Environmental Risk API
+
+`GET /api/environmental-risk?lat=43.6532&lng=-79.3832` combines hourly-refreshed TRCA regulatory floodplain exposure, five-minute Environment Canada GeoMet weather alerts, and five-minute supplemental current conditions from Open-Meteo. Each upstream result includes freshness and stale-cache metadata. These feeds are anonymous and do not require API keys.
+
+`GET /api/risk-map` returns locally computed predictive ward risk summaries. `POST /api/incident` keeps its original response fields and adds ward risk, compound risk factors, prediction-confirmation escalation, and measured gateway performance metadata.
 
 ### Frontend (`.env.local`)
 
