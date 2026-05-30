@@ -19,25 +19,17 @@ export default function CameraCapture({ isActive, onFrame }: CameraCaptureProps)
       if (intervalRef.current) clearInterval(intervalRef.current);
       return;
     }
-
     if (!permission?.granted) return;
 
-    // Capture a frame every 3 seconds
     intervalRef.current = setInterval(async () => {
       if (!cameraRef.current) return;
       try {
-        const photo = await cameraRef.current.takePictureAsync({
-          base64: true,
-          quality: 0.5,
-          skipProcessing: true,
-        });
+        const photo = await cameraRef.current.takePictureAsync({ base64: true, quality: 0.5 });
         if (photo?.base64) onFrameRef.current(photo.base64);
       } catch {}
     }, 3000);
 
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
+    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
   }, [isActive, permission?.granted]);
 
   if (!permission) return <View style={styles.box} />;
@@ -61,36 +53,28 @@ export default function CameraCapture({ isActive, onFrame }: CameraCaptureProps)
     );
   }
 
+  // Overlays are siblings of CameraView (not children) — SDK 54 requirement
   return (
     <View style={styles.box}>
-      <CameraView ref={cameraRef} style={styles.camera} facing="back">
-        {/* REC badge */}
-        <View style={styles.recBadge}>
-          <View style={styles.recDot} />
-          <Text style={styles.recText}>REC</Text>
-        </View>
-        {/* Label */}
-        <View style={styles.labelBar}>
-          <Text style={styles.labelText}>LIVE FEED</Text>
-        </View>
-      </CameraView>
+      <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" />
+      <View style={styles.recBadge} pointerEvents="none">
+        <View style={styles.recDot} />
+        <Text style={styles.recText}>REC</Text>
+      </View>
+      <View style={styles.labelBar} pointerEvents="none">
+        <Text style={styles.labelText}>LIVE FEED</Text>
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   box: {
-    width: 160,
-    height: 120,
-    borderRadius: 10,
-    overflow: "hidden",
-    borderWidth: 1,
-    borderColor: "#134e4a",
-    backgroundColor: "#000",
-    alignItems: "center",
-    justifyContent: "center",
+    width: 160, height: 120, borderRadius: 10,
+    overflow: "hidden", borderWidth: 1,
+    borderColor: "#134e4a", backgroundColor: "#000",
+    alignItems: "center", justifyContent: "center",
   },
-  camera:      { flex: 1, width: "100%" },
   offText:     { color: "#374151", fontFamily: "monospace", fontSize: 10 },
   recBadge:    { position: "absolute", top: 8, right: 8, flexDirection: "row", alignItems: "center", gap: 4 },
   recDot:      { width: 6, height: 6, borderRadius: 3, backgroundColor: "#ef4444" },

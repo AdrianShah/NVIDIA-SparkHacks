@@ -1,34 +1,21 @@
 import { Audio } from "expo-av";
-import * as FileSystem from "expo-file-system/legacy";
 import * as Location from "expo-location";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
-  Dimensions,
-  SafeAreaView,
-  ScrollView,
-  StatusBar,
-  StyleSheet,
-  Text,
-  TouchableOpacity,
-  View,
+  Dimensions, Modal, ScrollView, StatusBar, StyleSheet,
+  Text, TextInput, TouchableOpacity, View,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import MapView, { WardScore, SpatialData } from "./components/MapView";
 import AgentCard, { NodeStatus } from "./components/AgentCard";
 import CameraCapture from "./components/CameraCapture";
 import DispatchReport from "./components/DispatchReport";
-import MapView from "./components/MapView";
-import type { SpatialData } from "./components/MapView";
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL ?? "http://localhost:8080";
-const WS_URL  = process.env.EXPO_PUBLIC_WS_URL ?? `${API_URL.replace(/^http/, "ws")}/ws/stream`;
+const { height: SCREEN_HEIGHT } = Dimensions.get("window");
 
 type UrgencyLevel = "LOW" | "HIGH" | "CRITICAL";
-
-interface AgentNodeDef {
-  name: string;
-  label: string;
-  status: NodeStatus;
-  detail: string;
-}
+interface AgentNodeDef { name: string; label: string; status: NodeStatus; detail: string; }
 
 const INITIAL_NODES: AgentNodeDef[] = [
   { name: "orchestrator", label: "Orchestrator", status: "idle", detail: "" },
@@ -37,388 +24,469 @@ const INITIAL_NODES: AgentNodeDef[] = [
   { name: "compiler",     label: "Compiler",     status: "idle", detail: "" },
 ];
 
-const SCREEN_HEIGHT = Dimensions.get("window").height;
+const MODEL_LABELS: Record<string, string> = {
+  orchestrator: "Mistral Nemotron",
+  vision:       "Llama 4 Maverick",
+  localizer:    "GeoPandas · GPU",
+  compiler:     "Nemotron 30B",
+};
 
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
-  return globalThis.btoa(binary);
-}
+const RISK_COLOR: Record<string, string> = {
+  CRITICAL: "#ef4444", HIGH: "#f97316", ELEVATED: "#eab308", LOW: "#22c55e",
+};
+
+const MOCK_WARDS: WardScore[] = [
+  { id: "1", name: "Etobicoke North",      score: 87, lat: 43.7380, lng: -79.5765, risk_level: "CRITICAL", in_flood_zone: true,  prior_311: 6, watermain_age: 72 },
+  { id: "2", name: "York South-Weston",    score: 74, lat: 43.6900, lng: -79.4700, risk_level: "HIGH",     in_flood_zone: true,  prior_311: 4, watermain_age: 55 },
+  { id: "3", name: "Parkdale-High Park",   score: 62, lat: 43.6430, lng: -79.4490, risk_level: "HIGH",     in_flood_zone: false, prior_311: 3, watermain_age: 48 },
+  { id: "4", name: "Scarborough SW",       score: 55, lat: 43.7000, lng: -79.2300, risk_level: "ELEVATED", in_flood_zone: false, prior_311: 2, watermain_age: 30 },
+  { id: "5", name: "Downtown Core",        score: 45, lat: 43.6532, lng: -79.3832, risk_level: "ELEVATED", in_flood_zone: false, prior_311: 2, watermain_age: 60 },
+  { id: "6", name: "North York Centre",    score: 30, lat: 43.7615, lng: -79.4111, risk_level: "LOW",      in_flood_zone: false, prior_311: 1, watermain_age: 15 },
+  { id: "7", name: "Scarborough North",    score: 68, lat: 43.7800, lng: -79.2500, risk_level: "HIGH",     in_flood_zone: false, prior_311: 3, watermain_age: 40 },
+  { id: "8", name: "Humber River-Black Creek", score: 72, lat: 43.7200, lng: -79.5200, risk_level: "HIGH", in_flood_zone: true,  prior_311: 5, watermain_age: 58 },
+];
+
 
 export default function App() {
-  const [isActive, setIsActive]         = useState(false);
-  const [gps, setGps]                   = useState({ lat: 43.6532, lng: -79.3832 });
-  const [nodes, setNodes]               = useState<AgentNodeDef[]>(INITIAL_NODES);
-  const [report, setReport]             = useState("");
-  const [vision, setVision]             = useState<any>(null);
-  const [spatial, setSpatial]           = useState<SpatialData | null>(null);
-  const [urgency, setUrgency]           = useState<UrgencyLevel>("LOW");
+  // ── Theme ────────────────────────────────────────────────────────────────────
+  const [isDark, setIsDark] = useState(true);
+  const theme = {
+    bg:      isDark ? "#050F14" : "#f8fafc",
+    bgCard:  isDark ? "#0d1f2d" : "#ffffff",
+    bgPanel: isDark ? "#071a24" : "#f1f5f9",
+    border:  isDark ? "#134e4a" : "#e2e8f0",
+    text:    isDark ? "#e5e7eb" : "#0f172a",
+    muted:   isDark ? "#6b7280" : "#64748b",
+    teal:    isDark ? "#2dd4bf" : "#0d9488",
+  };
+
+  // ── State ─────────────────────────────────────────────────────────────────────
+  const [gps, setGps]             = useState({ lat: 43.6532, lng: -79.3832 });
+  const [wardScores, setWardScores] = useState<WardScore[]>(MOCK_WARDS);
+  const [selectedWard, setSelectedWard] = useState<WardScore | null>(null);
+  const [incidents, setIncidents]  = useState<any[]>([]);
+  const [nodes, setNodes]          = useState<AgentNodeDef[]>(INITIAL_NODES);
+  const [report, setReport]        = useState("");
+  const [spatial, setSpatial]      = useState<SpatialData | null>(null);
+  const [urgency, setUrgency]      = useState<UrgencyLevel>("LOW");
   const [isProcessing, setIsProcessing] = useState(false);
   const [audioStatus, setAudioStatus]   = useState("MIC IDLE");
+  const [wardRisk, setWardRisk]    = useState<{ score: number; escalated: boolean } | null>(null);
+  const [showReportModal, setShowReportModal] = useState(false);
+  const [confirmedCount, setConfirmedCount]   = useState(0);
 
-  const currentFrameRef = useRef<string | null>(null);
-  const isProcessingRef = useRef(false);
-  const wsRef           = useRef<WebSocket | null>(null);
-  const pollRef         = useRef<ReturnType<typeof setInterval> | null>(null);
-  const recordingRef    = useRef<Audio.Recording | null>(null);
+  const currentFrameRef  = useRef<string | null>(null);
+  const isProcessingRef  = useRef(false);
+  const recordingRef     = useRef<Audio.Recording | null>(null);
+  const watchIdRef       = useRef<Location.LocationSubscription | null>(null);
 
+  // ── Live GPS ──────────────────────────────────────────────────────────────────
   useEffect(() => {
     (async () => {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== "granted") return;
+      // One-time fix to get initial position fast
       const loc = await Location.getCurrentPositionAsync({});
       setGps({ lat: loc.coords.latitude, lng: loc.coords.longitude });
+      // Then watch for updates
+      watchIdRef.current = await Location.watchPositionAsync(
+        { accuracy: Location.Accuracy.High, timeInterval: 5000, distanceInterval: 10 },
+        (l) => setGps({ lat: l.coords.latitude, lng: l.coords.longitude })
+      );
     })();
+    return () => { watchIdRef.current?.remove(); };
   }, []);
 
-  const resetNodes = () =>
-    setNodes(INITIAL_NODES.map((n) => ({ ...n, status: "idle", detail: "" })));
+  // ── Fetch ward scores ─────────────────────────────────────────────────────────
+  useEffect(() => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 4000); // 4s timeout
+    fetch(`${API_URL}/api/risk-map`, { signal: ctrl.signal })
+      .then((r) => r.json())
+      .then((d) => { if (d.wards?.length) setWardScores(d.wards); })
+      .catch(() => {}) // stay on MOCK_WARDS
+      .finally(() => clearTimeout(timer));
+  }, []);
 
-  const setNodeStatus = (name: string, status: NodeStatus, detail = "") =>
-    setNodes((prev) =>
-      prev.map((n) => (n.name === name ? { ...n, status, detail } : n))
-    );
-
-  const startAudioRecording = useCallback(async () => {
+  // ── Audio helpers ─────────────────────────────────────────────────────────────
+  const startRecording = useCallback(async () => {
     if (recordingRef.current) return;
     try {
-      const permission = await Audio.requestPermissionsAsync();
-      if (!permission.granted) {
-        setAudioStatus("MIC DENIED");
-        return;
-      }
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
-      });
-      const { recording } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY
-      );
+      const perm = await Audio.requestPermissionsAsync();
+      if (!perm.granted) { setAudioStatus("MIC DENIED"); return; }
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+      const { recording } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
       recordingRef.current = recording;
       setAudioStatus("MIC RECORDING");
-    } catch {
-      setAudioStatus("MIC UNAVAILABLE");
-    }
+    } catch { setAudioStatus("MIC UNAVAILABLE"); }
   }, []);
 
-  const stopAudioRecordingAndUpload = useCallback(async (ws: WebSocket) => {
-    const recording = recordingRef.current;
+  const stopRecording = useCallback(async () => {
+    const rec = recordingRef.current;
     recordingRef.current = null;
-    if (!recording) return;
-
-    try {
-      setAudioStatus("MIC UPLOADING");
-      await recording.stopAndUnloadAsync();
-      const uri = recording.getURI();
-      if (!uri) return;
-
-      const b64 = await FileSystem.readAsStringAsync(uri, {
-        encoding: FileSystem.EncodingType.Base64,
-      });
-      ws.send(JSON.stringify({ type: "audio_start", format: "m4a" }));
-      ws.send(JSON.stringify({ type: "audio_chunk", data: b64 }));
-      ws.send(JSON.stringify({ type: "audio_commit" }));
-      await FileSystem.deleteAsync(uri, { idempotent: true });
-    } catch {
-      setAudioStatus("MIC UPLOAD FAILED");
-    }
-  }, []);
-
-  const stopAudioRecording = useCallback(async () => {
-    const recording = recordingRef.current;
-    recordingRef.current = null;
-    if (!recording) return;
-    try {
-      await recording.stopAndUnloadAsync();
-      const uri = recording.getURI();
-      if (uri) await FileSystem.deleteAsync(uri, { idempotent: true });
-    } catch {}
+    if (!rec) return;
+    try { await rec.stopAndUnloadAsync(); } catch {}
     setAudioStatus("MIC IDLE");
   }, []);
 
-  const setupWebSocket = useCallback(() => {
-    try {
-      const ws = new WebSocket(WS_URL);
-      ws.onopen    = () => { wsRef.current = ws; };
-      ws.onmessage = (event) => {
-        const { node, status, data: nodeData } = JSON.parse(event.data);
-        if (node === "stt") {
-          if (status === "active") setAudioStatus("MIC TRANSCRIBING");
-          else if (status === "error") setAudioStatus("MIC FALLBACK");
-          else setAudioStatus(nodeData?.used_fallback ? "MIC FALLBACK" : "MIC READY");
-        }
-        if (node && status) {
-          let detail = "";
-          if (node === "vision" && nodeData?.vision_analysis)
-            detail = `${nodeData.vision_analysis.hazard_type ?? ""} · ${nodeData.vision_analysis.severity_scale ?? "?"}/10`;
-          else if (node === "localizer" && nodeData?.spatial_data_results) {
-            const h = nodeData.spatial_data_results.closest_hydrants?.[0];
-            detail = h ? `Hydrant @ ${h.distance_meters} m` : "";
-          }
-          setNodeStatus(node, status as NodeStatus, detail);
-        }
-        if (nodeData?.final_dispatch_report) { setReport(nodeData.final_dispatch_report); setIsProcessing(false); }
-        if (nodeData?.urgency_level)          setUrgency(nodeData.urgency_level as UrgencyLevel);
-        if (nodeData?.vision_analysis)        setVision(nodeData.vision_analysis);
-        if (nodeData?.spatial_data_results)   setSpatial(nodeData.spatial_data_results);
-      };
-      ws.onerror = () => { wsRef.current = null; };
-      ws.onclose = () => { wsRef.current = null; };
-    } catch {}
-  }, []);
-
-  const processIncident = useCallback(async () => {
+  // ── Submit incident ───────────────────────────────────────────────────────────
+  const submitIncident = useCallback(async (transcript: string) => {
     if (isProcessingRef.current) return;
     isProcessingRef.current = true;
     setIsProcessing(true);
-    setNodeStatus("orchestrator", "active");
+    setNodes(INITIAL_NODES.map((n) => ({ ...n, status: "idle", detail: "" })));
+    setNodes((p) => p.map((n) => n.name === "orchestrator" ? { ...n, status: "active" } : n));
+
     try {
       const res = await fetch(`${API_URL}/api/incident`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          transcript: "Emergency incident reported at this location",
-          frame_b64: currentFrameRef.current,
-          gps,
-        }),
+        body: JSON.stringify({ transcript, frame_b64: currentFrameRef.current ?? "", gps }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      setNodes(
-        INITIAL_NODES.map((n) => ({
-          ...n, status: "complete",
-          detail:
-            n.name === "vision"    ? `${data.vision?.hazard_type ?? ""} · ${data.vision?.severity_scale ?? "?"}/10`
-            : n.name === "localizer" ? `${data.spatial?.closest_hydrants?.[0]?.distance_meters ?? "?"} m to hydrant`
-            : "",
-        }))
-      );
+
+      if (data.legitimate === false) {
+        setNodes(INITIAL_NODES.map((n) => ({
+          ...n, status: "error",
+          detail: n.name === "orchestrator" ? "Not verified" : "",
+        })));
+        setReport("⚠ Report not verified. Please provide more detail.");
+        return;
+      }
+
+      setNodes(INITIAL_NODES.map((n) => ({
+        ...n, status: "complete",
+        detail: n.name === "vision"    ? `${data.vision?.hazard_type ?? ""} · ${data.vision?.severity_scale ?? "?"}/10`
+              : n.name === "localizer" ? `Hydrant: ${data.spatial?.closest_hydrants?.[0]?.distance_meters ?? "?"}m`
+              : n.name === "compiler"  ? `Risk: ${data.ward_risk?.toFixed(0) ?? "?"}${data.escalated ? " ⚠" : ""}`
+              : "",
+      })));
       setReport(data.report ?? "");
       setUrgency((data.urgency as UrgencyLevel) ?? "HIGH");
-      setVision(data.vision ?? null);
       setSpatial(data.spatial ?? null);
+      setWardRisk({ score: data.ward_risk ?? 0, escalated: data.escalated ?? false });
+      if (data.escalated) setConfirmedCount((c) => c + 1);
+      setIncidents((p) => [...p, { lat: gps.lat, lng: gps.lng, urgency: data.urgency ?? "HIGH", transcript }]);
+
+      // Refresh ward scores
+      fetch(`${API_URL}/api/risk-map`).then((r) => r.json()).then((d) => { if (d.wards?.length) setWardScores(d.wards); });
     } catch {
-      setNodes((prev) =>
-        prev.map((n) => (n.status === "active" ? { ...n, status: "error" } : n))
-      );
+      setNodes((p) => p.map((n) => n.status === "active" ? { ...n, status: "error" } : n));
     } finally {
       setIsProcessing(false);
       isProcessingRef.current = false;
     }
   }, [gps]);
 
-  const sendIncident = useCallback(async () => {
-    const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      setIsProcessing(true);
-      resetNodes();
-      await stopAudioRecordingAndUpload(ws);
-      ws.send(JSON.stringify({ transcript: "Emergency incident reported", frame_b64: currentFrameRef.current, gps }));
-      await startAudioRecording();
-    } else {
-      resetNodes();
-      processIncident();
-    }
-  }, [gps, processIncident, startAudioRecording, stopAudioRecordingAndUpload]);
-
-  const startIncident = async () => {
-    setIsActive(true);
-    setReport("");
-    resetNodes();
-    await startAudioRecording();
-    setupWebSocket();
-    const id = setInterval(() => {
-      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-        if (currentFrameRef.current) processIncident();
-      }
-    }, 6000);
-    pollRef.current = id;
-    setTimeout(() => { if (currentFrameRef.current) sendIncident(); }, 3000);
+  const handleReportPress = async () => {
+    setShowReportModal(true);
+    await startRecording();
   };
 
-  const stopIncident = async () => {
-    setIsActive(false);
-    wsRef.current?.close();
-    wsRef.current = null;
-    if (pollRef.current) clearInterval(pollRef.current);
-    await stopAudioRecording();
-    resetNodes();
+  const handleReportSubmit = async (transcript: string) => {
+    setShowReportModal(false);
+    await stopRecording();
+    await submitIncident(transcript || "Emergency incident reported at this location");
   };
-
-  const playAudio = async () => {
-    if (!report) return;
-    try {
-      const res = await fetch(`${API_URL}/api/synthesize`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: report.slice(0, 500) }),
-      });
-      const b64 = arrayBufferToBase64(await res.arrayBuffer());
-      const uri = (FileSystem.cacheDirectory ?? FileSystem.documentDirectory ?? "") + "dispatch.wav";
-      await FileSystem.writeAsStringAsync(uri, b64, { encoding: FileSystem.EncodingType.Base64 });
-      const { sound } = await Audio.Sound.createAsync({ uri });
-      await sound.playAsync();
-    } catch {}
-  };
-
-  const urgencyColor =
-    ({ CRITICAL: "#ef4444", HIGH: "#f97316", LOW: "#22c55e" } as Record<string, string>)[urgency] ?? "#6b7280";
 
   return (
-    <SafeAreaView style={styles.root}>
-      <StatusBar barStyle="light-content" backgroundColor="#050F14" />
+    <SafeAreaView style={[styles.root, { backgroundColor: theme.bg }]}>
+      <StatusBar barStyle={isDark ? "light-content" : "dark-content"} backgroundColor={theme.bg} />
 
-      {/* Map — top 42% */}
+      {/* ── Map (top 48%) ── */}
       <View style={styles.mapContainer}>
-        <MapView gps={gps} spatial={spatial} urgency={urgency} isActive={isActive} />
+        <MapView
+          gps={gps}
+          wardScores={wardScores}
+          spatial={spatial}
+          incidents={incidents}
+          isDark={isDark}
+          isActive={isProcessing}
+          urgency={urgency}
+          onWardPress={setSelectedWard}
+        />
 
-        <View style={styles.cameraOverlay}>
-          <CameraCapture isActive={isActive} onFrame={(f) => { currentFrameRef.current = f; }} />
-        </View>
-
-        {isActive && (
-          <View style={[styles.urgencyBadge, { borderColor: urgencyColor }]}>
-            <View style={[styles.urgencyDot, { backgroundColor: urgencyColor }]} />
-            <Text style={[styles.urgencyText, { color: urgencyColor }]}>{urgency} INCIDENT LIVE</Text>
+        {/* Camera preview — only shown when actively processing */}
+        {isProcessing && (
+          <View style={styles.cameraOverlay}>
+            <CameraCapture isActive={isProcessing} onFrame={(f) => { currentFrameRef.current = f; }} />
           </View>
         )}
 
-        <TouchableOpacity
-          style={[styles.startBtn, { backgroundColor: isActive ? "#dc2626" : "#0d9488" }]}
-          onPress={isActive ? stopIncident : startIncident}
-          activeOpacity={0.8}
-        >
-          <Text style={styles.startBtnText}>{isActive ? "◼ STOP" : "▶ START INCIDENT"}</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Bottom panel */}
-      <View style={styles.panel}>
-        <View style={styles.header}>
+        {/* Top bar overlay */}
+        <View style={styles.topBar}>
           <View>
-            <Text style={styles.title}>CIVICVOX-OMNI</Text>
-            <Text style={styles.subtitle}>Edge Emergency Intelligence · Toronto</Text>
+            <Text style={[styles.appTitle, { color: theme.teal }]}>DELATION</Text>
+            <Text style={[styles.appSubtitle, { color: theme.muted }]}>
+              📍 {gps.lat.toFixed(4)}, {gps.lng.toFixed(4)}
+            </Text>
           </View>
-          <View>
-            <Text style={styles.hwLabel}>NVIDIA GB10</Text>
-            <Text style={styles.micLabel}>{audioStatus}</Text>
+          <View style={styles.topBarRight}>
+            {confirmedCount > 0 && (
+              <View style={styles.confirmedBadge}>
+                <Text style={styles.confirmedText}>✓ {confirmedCount}</Text>
+              </View>
+            )}
+            <TouchableOpacity
+              onPress={() => setIsDark((d) => !d)}
+              style={[styles.themeBtn, { backgroundColor: "rgba(0,0,0,0.4)", borderColor: theme.teal }]}
+            >
+              <Text style={{ fontSize: 14 }}>{isDark ? "☀️" : "🌙"}</Text>
+            </TouchableOpacity>
           </View>
         </View>
 
-        <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
-          <Text style={styles.sectionLabel}>── AGENT PIPELINE</Text>
-          <View style={styles.agentRow}><AgentCard {...nodes[0]} /><AgentCard {...nodes[1]} /></View>
-          <View style={styles.agentRow}><AgentCard {...nodes[2]} /><AgentCard {...nodes[3]} /></View>
+        {/* Report button */}
+        <TouchableOpacity
+          style={[styles.reportBtn, { backgroundColor: isProcessing ? "#6b7280" : "#dc2626" }]}
+          onPress={handleReportPress}
+          disabled={isProcessing}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.reportBtnText}>{isProcessing ? "PROCESSING…" : "▶ REPORT INCIDENT"}</Text>
+        </TouchableOpacity>
+      </View>
 
-          {vision && (
-            <View style={styles.visionBox}>
-              <Text style={styles.visionTitle}>VISION ANALYSIS</Text>
-              <View style={styles.visionGrid}>
-                {[
-                  ["Hazard",      vision.hazard_type],
-                  ["Severity",    `${vision.severity_scale ?? "?"}/10`],
-                  ["Struct Risk", vision.structural_risk ? "YES" : "NO"],
-                  ["Location",    vision.location_cues || "—"],
-                ].map(([k, v]) => (
-                  <View key={k} style={styles.visionItem}>
-                    <Text style={styles.visionKey}>{k}:</Text>
-                    <Text
-                      style={[
-                        styles.visionVal,
-                        k === "Severity"    && (vision.severity_scale ?? 0) >= 7 && { color: "#f87171" },
-                        k === "Struct Risk" && vision.structural_risk            && { color: "#f87171" },
-                      ]}
-                      numberOfLines={1}
-                    >
-                      {String(v)}
-                    </Text>
-                  </View>
-                ))}
-              </View>
-            </View>
-          )}
+      {/* ── Bottom panel ── */}
+      <View style={[styles.panel, { backgroundColor: theme.bgPanel, borderTopColor: theme.border }]}>
 
-          {(spatial?.closest_hydrants?.length ?? 0) > 0 && (
-            <View style={styles.hydrantBox}>
-              <Text style={styles.hydrantTitle}>NEAREST HYDRANTS</Text>
-              {spatial!.closest_hydrants!.slice(0, 3).map((h) => (
-                <View key={h.id} style={styles.hydrantRow}>
-                  <Text style={styles.hydrantId}>▲ #{h.id}</Text>
-                  <Text style={styles.hydrantDist}>{h.distance_meters} m</Text>
-                  <Text style={styles.hydrantStatus}>{h.status}</Text>
+        {/* Ward risk banner */}
+        {wardRisk && (
+          <View style={[styles.wardBanner, { backgroundColor: theme.bgCard, borderColor: wardRisk.escalated ? "#ef4444" : theme.border }]}>
+            <View style={styles.wardBannerRow}>
+              <Text style={[styles.wardBannerLabel, { color: theme.muted }]}>WARD RISK SCORE</Text>
+              {wardRisk.escalated && (
+                <View style={styles.escalatedBadge}>
+                  <Text style={styles.escalatedText}>⚠ PREDICTION CONFIRMED</Text>
                 </View>
+              )}
+            </View>
+            <View style={styles.wardBannerScore}>
+              <Text style={[styles.wardBannerNum, { color: wardRisk.escalated ? "#ef4444" : theme.teal }]}>
+                {wardRisk.score.toFixed(0)}
+              </Text>
+              <Text style={[styles.wardBannerDenom, { color: theme.muted }]}>/100</Text>
+              {wardRisk.escalated && (
+                <Text style={[styles.wardBannerNotice, { color: "#ef4444" }]}>  City of Toronto notified</Text>
+              )}
+            </View>
+          </View>
+        )}
+
+        <ScrollView showsVerticalScrollIndicator={false} style={{ flex: 1 }}>
+
+          {/* Top wards list */}
+          {wardScores.length > 0 && (
+            <View style={styles.section}>
+              <Text style={[styles.sectionLabel, { color: theme.muted }]}>── WARD RISK BRIEFING</Text>
+              {wardScores.slice(0, 4).map((w) => (
+                <TouchableOpacity
+                  key={w.id}
+                  onPress={() => setSelectedWard(w)}
+                  style={[styles.wardRow, { backgroundColor: theme.bgCard, borderColor: theme.border }]}
+                >
+                  <View style={[styles.wardDotSmall, { backgroundColor: RISK_COLOR[w.risk_level] }]} />
+                  <Text style={[styles.wardName, { color: theme.text }]} numberOfLines={1}>{w.name}</Text>
+                  <Text style={[styles.wardScoreText, { color: RISK_COLOR[w.risk_level] }]}>{w.score.toFixed(0)}/100</Text>
+                </TouchableOpacity>
               ))}
             </View>
           )}
 
-          <Text style={[styles.sectionLabel, { marginTop: 12 }]}>── DISPATCH PROTOCOL</Text>
-          <View style={styles.reportBox}>
-            <DispatchReport report={report} isProcessing={isProcessing} />
+          {/* Agent pipeline */}
+          <View style={styles.section}>
+            <Text style={[styles.sectionLabel, { color: theme.muted }]}>── AGENT PIPELINE</Text>
+            <View style={styles.agentRow}>
+              <AgentCard {...nodes[0]} detail={nodes[0].detail || MODEL_LABELS.orchestrator} />
+              <AgentCard {...nodes[1]} detail={nodes[1].detail || MODEL_LABELS.vision} />
+            </View>
+            <View style={styles.agentRow}>
+              <AgentCard {...nodes[2]} detail={nodes[2].detail || MODEL_LABELS.localizer} />
+              <AgentCard {...nodes[3]} detail={nodes[3].detail || MODEL_LABELS.compiler} />
+            </View>
           </View>
 
-          {report ? (
-            <TouchableOpacity style={styles.audioBtn} onPress={playAudio} activeOpacity={0.7}>
-              <Text style={styles.audioBtnText}>🔊 PLAY AUDIO DISPATCH</Text>
-            </TouchableOpacity>
-          ) : null}
+          {/* Dispatch report */}
+          <View style={styles.section}>
+            <Text style={[styles.sectionLabel, { color: theme.muted }]}>── DISPATCH PROTOCOL</Text>
+            <View style={[styles.reportBox, { borderColor: theme.border }]}>
+              <DispatchReport report={report} isProcessing={isProcessing} />
+            </View>
+          </View>
 
-          <View style={{ height: 32 }} />
+          <View style={{ height: 24 }} />
         </ScrollView>
       </View>
+
+      {/* ── Zone detail modal ── */}
+      <Modal visible={!!selectedWard} transparent animationType="slide" onRequestClose={() => setSelectedWard(null)}>
+        <TouchableOpacity style={styles.modalBackdrop} activeOpacity={1} onPress={() => setSelectedWard(null)} />
+        {selectedWard && (
+          <View style={[styles.zoneModal, { backgroundColor: theme.bgCard, borderColor: theme.border }]}>
+            <View style={styles.zoneModalHandle} />
+            <View style={styles.zoneModalHeader}>
+              <View style={[styles.riskPill, { backgroundColor: `${RISK_COLOR[selectedWard.risk_level]}22`, borderColor: RISK_COLOR[selectedWard.risk_level] }]}>
+                <Text style={[styles.riskPillText, { color: RISK_COLOR[selectedWard.risk_level] }]}>{selectedWard.risk_level}</Text>
+              </View>
+              <TouchableOpacity onPress={() => setSelectedWard(null)}>
+                <Text style={[styles.closeBtn, { color: theme.muted }]}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            <Text style={[styles.zoneName, { color: theme.text }]}>{selectedWard.name}</Text>
+
+            {/* Score bar */}
+            <View style={styles.scoreBarRow}>
+              <Text style={[styles.scoreLabel, { color: theme.muted }]}>Risk Score</Text>
+              <Text style={[styles.scoreValue, { color: RISK_COLOR[selectedWard.risk_level] }]}>{selectedWard.score.toFixed(0)}/100</Text>
+            </View>
+            <View style={[styles.scoreBarBg, { backgroundColor: theme.border }]}>
+              <View style={[styles.scoreBarFill, { width: `${selectedWard.score}%` as any, backgroundColor: RISK_COLOR[selectedWard.risk_level] }]} />
+            </View>
+
+            {/* Risk factors */}
+            <View style={styles.factorsGrid}>
+              {[
+                { label: "Flood Zone",     value: selectedWard.in_flood_zone ? "YES" : "No",       flag: !!selectedWard.in_flood_zone },
+                { label: "311 Calls",      value: `${selectedWard.prior_311 ?? 0} nearby`,          flag: (selectedWard.prior_311 ?? 0) > 3 },
+                { label: "Watermain Age",  value: selectedWard.watermain_age ? `${selectedWard.watermain_age}yr` : "Unknown", flag: (selectedWard.watermain_age ?? 0) > 50 },
+                { label: "Coordinates",    value: `${selectedWard.lat.toFixed(3)}, ${selectedWard.lng.toFixed(3)}`, flag: false },
+              ].map((f) => (
+                <View key={f.label} style={[styles.factorItem, { backgroundColor: theme.bgPanel, borderColor: theme.border }]}>
+                  <Text style={[styles.factorLabel, { color: theme.muted }]}>{f.label}</Text>
+                  <Text style={[styles.factorValue, { color: f.flag ? RISK_COLOR[selectedWard.risk_level] : theme.text }]}>{f.value}</Text>
+                </View>
+              ))}
+            </View>
+
+            <TouchableOpacity
+              style={[styles.reportFromZoneBtn, { backgroundColor: "#dc2626" }]}
+              onPress={() => { setSelectedWard(null); handleReportPress(); }}
+            >
+              <Text style={styles.reportFromZoneBtnText}>Report Incident in This Zone</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+      </Modal>
+
+      {/* ── Report incident modal ── */}
+      <Modal visible={showReportModal} transparent animationType="slide" onRequestClose={() => { setShowReportModal(false); stopRecording(); }}>
+        <ReportIncidentSheet
+          theme={theme}
+          audioStatus={audioStatus}
+          onSubmit={handleReportSubmit}
+          onCancel={() => { setShowReportModal(false); stopRecording(); }}
+        />
+      </Modal>
     </SafeAreaView>
   );
 }
 
+// ── Report sheet component ────────────────────────────────────────────────────
+function ReportIncidentSheet({ theme, audioStatus, onSubmit, onCancel }: {
+  theme: any; audioStatus: string;
+  onSubmit: (t: string) => void;
+  onCancel: () => void;
+}) {
+  const [text, setText] = useState("");
+  return (
+    <View style={{ flex: 1, justifyContent: "flex-end" }}>
+      <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={onCancel} />
+      <View style={[styles.reportSheet, { backgroundColor: theme.bgCard, borderColor: theme.border }]}>
+        <View style={styles.zoneModalHandle} />
+        <Text style={[styles.reportSheetTitle, { color: theme.text }]}>Report an Incident</Text>
+        <Text style={[styles.reportSheetSub, { color: theme.muted }]}>
+          {audioStatus === "MIC RECORDING" ? "🔴 Recording voice…" : `Mic: ${audioStatus}`}
+        </Text>
+        <TextInput
+          style={[styles.textInputBox, { backgroundColor: theme.bgPanel, borderColor: theme.border, color: theme.text }]}
+          placeholder="Describe what you see — flooding, pothole, fire, construction hazard…"
+          placeholderTextColor={theme.muted}
+          multiline
+          numberOfLines={4}
+          value={text}
+          onChangeText={setText}
+        />
+        <View style={styles.reportSheetBtns}>
+          <TouchableOpacity style={[styles.cancelBtn, { borderColor: theme.border }]} onPress={onCancel}>
+            <Text style={[styles.cancelBtnText, { color: theme.muted }]}>Cancel</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.submitBtn} onPress={() => onSubmit(text)}>
+            <Text style={styles.submitBtnText}>Submit Report</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
-  root:          { flex: 1, backgroundColor: "#050F14" },
-  mapContainer:  { height: SCREEN_HEIGHT * 0.42 },
-  cameraOverlay: { position: "absolute", bottom: 12, left: 12 },
-  urgencyBadge:  {
-    position: "absolute", top: 12, left: 12,
-    flexDirection: "row", alignItems: "center", gap: 6,
-    borderWidth: 1, borderRadius: 6,
-    paddingHorizontal: 10, paddingVertical: 6,
-    backgroundColor: "rgba(0,0,0,0.7)",
-  },
-  urgencyDot:    { width: 8, height: 8, borderRadius: 4 },
-  urgencyText:   { fontFamily: "monospace", fontSize: 10, fontWeight: "700", letterSpacing: 2 },
-  startBtn:      {
-    position: "absolute", top: 12, right: 12,
-    paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8,
-  },
-  startBtnText:  { color: "#fff", fontFamily: "monospace", fontWeight: "700", fontSize: 12, letterSpacing: 1 },
+  root:            { flex: 1 },
+  mapContainer:    { height: SCREEN_HEIGHT * 0.48 },
+  cameraOverlay:   { position: "absolute", bottom: 56, left: 12 },
+  topBar:          { position: "absolute", top: 0, left: 0, right: 0, flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingHorizontal: 14, paddingVertical: 10, backgroundColor: "rgba(0,0,0,0.55)" },
+  appTitle:        { fontFamily: "monospace", fontWeight: "700", fontSize: 16, letterSpacing: 3 },
+  appSubtitle:     { fontFamily: "monospace", fontSize: 9, marginTop: 1 },
+  topBarRight:     { flexDirection: "row", alignItems: "center", gap: 8 },
+  confirmedBadge:  { backgroundColor: "#16a34a33", borderWidth: 1, borderColor: "#22c55e", borderRadius: 12, paddingHorizontal: 8, paddingVertical: 3 },
+  confirmedText:   { color: "#22c55e", fontFamily: "monospace", fontSize: 11, fontWeight: "700" },
+  themeBtn:        { width: 32, height: 32, borderRadius: 8, borderWidth: 1, alignItems: "center", justifyContent: "center" },
+  reportBtn:       { position: "absolute", bottom: 12, right: 12, paddingHorizontal: 16, paddingVertical: 9, borderRadius: 20, shadowColor: "#dc2626", shadowOpacity: 0.4, shadowRadius: 8, shadowOffset: { width: 0, height: 2 } },
+  reportBtnText:   { color: "#fff", fontFamily: "monospace", fontWeight: "700", fontSize: 12, letterSpacing: 1 },
 
-  panel:         { flex: 1, borderTopWidth: 1, borderTopColor: "#042f2e" },
-  header:        {
-    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
-    paddingHorizontal: 16, paddingVertical: 10,
-    borderBottomWidth: 1, borderBottomColor: "#042f2e",
-  },
-  title:         { color: "#2dd4bf", fontFamily: "monospace", fontWeight: "700", fontSize: 14, letterSpacing: 3 },
-  subtitle:      { color: "#374151", fontFamily: "monospace", fontSize: 9, marginTop: 2 },
-  hwLabel:       { color: "#374151", fontFamily: "monospace", fontSize: 9 },
-  micLabel:      { color: "#14b8a6", fontFamily: "monospace", fontSize: 8, marginTop: 2, textAlign: "right" },
+  panel:           { flex: 1, borderTopWidth: 1 },
+  wardBanner:      { margin: 10, borderWidth: 1, borderRadius: 10, padding: 12 },
+  wardBannerRow:   { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  wardBannerLabel: { fontFamily: "monospace", fontSize: 9, letterSpacing: 2 },
+  escalatedBadge:  { backgroundColor: "#ef444422", borderWidth: 1, borderColor: "#ef4444", borderRadius: 4, paddingHorizontal: 6, paddingVertical: 2 },
+  escalatedText:   { color: "#ef4444", fontFamily: "monospace", fontSize: 8, fontWeight: "700" },
+  wardBannerScore: { flexDirection: "row", alignItems: "baseline", marginTop: 4 },
+  wardBannerNum:   { fontSize: 32, fontFamily: "monospace", fontWeight: "700" },
+  wardBannerDenom: { fontFamily: "monospace", fontSize: 14, marginLeft: 2 },
+  wardBannerNotice:{ fontFamily: "monospace", fontSize: 9, marginLeft: 8 },
 
-  scroll:        { flex: 1, paddingHorizontal: 12 },
-  sectionLabel:  { color: "#374151", fontFamily: "monospace", fontSize: 9, letterSpacing: 2, marginTop: 12, marginBottom: 6 },
-  agentRow:      { flexDirection: "row", marginBottom: 2 },
+  section:         { paddingHorizontal: 10, paddingTop: 8 },
+  sectionLabel:    { fontFamily: "monospace", fontSize: 9, letterSpacing: 2, marginBottom: 6 },
+  wardRow:         { flexDirection: "row", alignItems: "center", gap: 8, padding: 10, borderRadius: 8, borderWidth: 1, marginBottom: 4 },
+  wardDotSmall:    { width: 8, height: 8, borderRadius: 4 },
+  wardName:        { flex: 1, fontFamily: "monospace", fontSize: 11 },
+  wardScoreText:   { fontFamily: "monospace", fontSize: 11, fontWeight: "700" },
+  agentRow:        { flexDirection: "row", marginBottom: 4 },
+  reportBox:       { minHeight: 100, borderWidth: 1, borderRadius: 8, padding: 10 },
 
-  visionBox:     { borderWidth: 1, borderColor: "#134e4a", borderRadius: 8, padding: 10, marginTop: 8, backgroundColor: "#042f2e33" },
-  visionTitle:   { color: "#14b8a6", fontFamily: "monospace", fontSize: 9, letterSpacing: 2, marginBottom: 8 },
-  visionGrid:    { flexDirection: "row", flexWrap: "wrap", gap: 6 },
-  visionItem:    { flexDirection: "row", gap: 4, width: "48%" },
-  visionKey:     { color: "#6b7280", fontFamily: "monospace", fontSize: 10 },
-  visionVal:     { color: "#d1d5db", fontFamily: "monospace", fontSize: 10, flex: 1 },
+  // Zone modal
+  modalBackdrop:   { flex: 1, backgroundColor: "rgba(0,0,0,0.4)" },
+  zoneModal:       { borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 1, padding: 20, paddingBottom: 36, maxHeight: SCREEN_HEIGHT * 0.7 },
+  zoneModalHandle: { width: 40, height: 4, borderRadius: 2, backgroundColor: "#374151", alignSelf: "center", marginBottom: 16 },
+  zoneModalHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 10 },
+  riskPill:        { borderWidth: 1, borderRadius: 20, paddingHorizontal: 10, paddingVertical: 4 },
+  riskPillText:    { fontFamily: "monospace", fontSize: 11, fontWeight: "700" },
+  closeBtn:        { fontSize: 18, padding: 4 },
+  zoneName:        { fontFamily: "monospace", fontWeight: "700", fontSize: 16, marginBottom: 14 },
+  scoreBarRow:     { flexDirection: "row", justifyContent: "space-between", marginBottom: 6 },
+  scoreLabel:      { fontFamily: "monospace", fontSize: 11 },
+  scoreValue:      { fontFamily: "monospace", fontSize: 11, fontWeight: "700" },
+  scoreBarBg:      { height: 6, borderRadius: 3, marginBottom: 14 },
+  scoreBarFill:    { height: 6, borderRadius: 3 },
+  factorsGrid:     { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 16 },
+  factorItem:      { width: "47%", padding: 10, borderRadius: 8, borderWidth: 1 },
+  factorLabel:     { fontFamily: "monospace", fontSize: 9, letterSpacing: 1, marginBottom: 4 },
+  factorValue:     { fontFamily: "monospace", fontSize: 12, fontWeight: "600" },
+  reportFromZoneBtn:  { borderRadius: 12, paddingVertical: 12, alignItems: "center" },
+  reportFromZoneBtnText: { color: "#fff", fontFamily: "monospace", fontWeight: "700", fontSize: 13 },
 
-  hydrantBox:    { borderWidth: 1, borderColor: "#1e3a5f", borderRadius: 8, padding: 10, marginTop: 8, backgroundColor: "#0c1a2e33" },
-  hydrantTitle:  { color: "#60a5fa", fontFamily: "monospace", fontSize: 9, letterSpacing: 2, marginBottom: 6 },
-  hydrantRow:    { flexDirection: "row", justifyContent: "space-between", paddingVertical: 2 },
-  hydrantId:     { color: "#60a5fa", fontFamily: "monospace", fontSize: 11 },
-  hydrantDist:   { color: "#9ca3af", fontFamily: "monospace", fontSize: 11 },
-  hydrantStatus: { color: "#4b5563", fontFamily: "monospace", fontSize: 11 },
+  // Report sheet
+  reportSheet:        { borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 1, padding: 20, paddingBottom: 40 },
+  reportSheetTitle:   { fontFamily: "monospace", fontWeight: "700", fontSize: 15, marginBottom: 4 },
+  reportSheetSub:     { fontFamily: "monospace", fontSize: 11, marginBottom: 14 },
+  textInputBox:       { borderWidth: 1, borderRadius: 10, padding: 14, minHeight: 90, marginBottom: 16 },
+  textInputPlaceholder: { fontFamily: "monospace", fontSize: 13, lineHeight: 20 },
+  reportSheetBtns:    { flexDirection: "row", gap: 10 },
+  cancelBtn:          { flex: 1, borderWidth: 1, borderRadius: 10, paddingVertical: 12, alignItems: "center" },
+  cancelBtnText:      { fontFamily: "monospace", fontSize: 13 },
+  submitBtn:          { flex: 2, backgroundColor: "#dc2626", borderRadius: 10, paddingVertical: 12, alignItems: "center" },
+  submitBtnText:      { color: "#fff", fontFamily: "monospace", fontWeight: "700", fontSize: 13 },
 
-  reportBox:     { minHeight: 120, borderWidth: 1, borderColor: "#042f2e", borderRadius: 8, padding: 10 },
-  audioBtn:      { marginTop: 8, borderWidth: 1, borderColor: "#134e4a", borderRadius: 8, paddingVertical: 10, alignItems: "center" },
-  audioBtnText:  { color: "#14b8a6", fontFamily: "monospace", fontSize: 11 },
+  wardBanner2:        { borderWidth: 1, borderRadius: 8, padding: 10, marginTop: 8 },
+  confirmedBadge2:    { borderWidth: 1, borderRadius: 4, paddingHorizontal: 6, paddingVertical: 2 },
 });
