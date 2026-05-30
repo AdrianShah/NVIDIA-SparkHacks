@@ -8,29 +8,34 @@ interface DispatchReportProps {
 
 export default function DispatchReport({ report, isProcessing }: DispatchReportProps) {
   const [displayed, setDisplayed] = useState("");
-  const [charIndex, setCharIndex] = useState(0);
+  const [targetLen, setTargetLen] = useState(0);
   const containerRef = useRef<HTMLDivElement>(null);
+  const prevReportRef = useRef(report);
 
-  // Reset and start typewriter when a new report arrives
   useEffect(() => {
-    setDisplayed("");
-    setCharIndex(0);
+    if (report.startsWith(prevReportRef.current)) {
+      setTargetLen(report.length);
+    } else {
+      setDisplayed("");
+      setTargetLen(report.length);
+    }
+    prevReportRef.current = report;
   }, [report]);
 
-  // Typewriter tick
   useEffect(() => {
-    if (!report || charIndex >= report.length) return;
+    if (!report || displayed.length >= targetLen) return;
 
     const id = setTimeout(() => {
-      setDisplayed((prev) => prev + report[charIndex]);
-      setCharIndex((prev) => prev + 1);
+      setDisplayed(report.slice(0, displayed.length + 1));
       if (containerRef.current) {
         containerRef.current.scrollTop = containerRef.current.scrollHeight;
       }
     }, 10);
 
     return () => clearTimeout(id);
-  }, [report, charIndex]);
+  }, [report, displayed, targetLen]);
+
+  const isTyping = report.length > 0 && displayed.length < targetLen;
 
   if (!report && !isProcessing) {
     return (
@@ -59,8 +64,8 @@ export default function DispatchReport({ report, isProcessing }: DispatchReportP
     <div ref={containerRef} className="h-full overflow-y-auto pr-1">
       <pre className="text-xs font-mono text-gray-300 whitespace-pre-wrap leading-relaxed">
         {displayed}
-        {charIndex < report.length && (
-          <span className="inline-block w-[2px] h-[14px] bg-teal-400 animate-pulse ml-px align-middle" />
+        {isTyping && (
+          <span className="inline-block w-[2px] h-[14px] bg-teal-400 ml-px align-middle animate-blink" />
         )}
       </pre>
     </div>

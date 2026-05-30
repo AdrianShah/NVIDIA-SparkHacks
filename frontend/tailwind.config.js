@@ -14,6 +14,13 @@ module.exports = {
       },
       animation: {
         "ping-slow": "ping 1.5s cubic-bezier(0, 0, 0.2, 1) infinite",
+        blink: "blink 530ms step-end infinite",
+      },
+      keyframes: {
+        blink: {
+          "0%, 100%": { opacity: "1" },
+          "50%": { opacity: "0" },
+        },
       },
     },
   },

@@ -2,6 +2,7 @@
 CivicVox-Omni API Gateway — FastAPI entry point.
 Runs on 0.0.0.0:8080. All other components communicate via local Python calls.
 """
+import asyncio
 import datetime
 import io
 import logging
@@ -14,11 +15,14 @@ import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
-from backend.agents.civic_vox_graph import AgentState, civic_vox_engine
-from backend.data import toronto_loader
+MOCK_MODE = os.getenv("MOCK_MODE", "false").lower() == "true"
+
+if not MOCK_MODE:
+    from langchain_core.messages import HumanMessage
+    from backend.agents.civic_vox_graph import AgentState, civic_vox_engine
+    from backend.data import toronto_loader
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(name)s  %(message)s")
 logger = logging.getLogger(__name__)
@@ -26,10 +30,58 @@ logger = logging.getLogger(__name__)
 _whisper_model = None
 _kokoro_model = None
 
+MOCK_INCIDENT_RESPONSE = {
+    "report": (
+        "DISPATCH PROTOCOL — INCIDENT #2024-MTF-0847\n"
+        "Priority: HIGH | Type: Structure Fire\n"
+        "Location: 45 Parliament St, Toronto ON\n"
+        "GPS: 43.6532°N, 79.3832°W\n\n"
+        "SITUATION: Multi-unit residential structure fire observed on floors 2-3. "
+        "Heavy smoke visible from east-facing windows. Potential for rapid vertical spread. "
+        "No confirmed occupant entrapment at this time.\n\n"
+        "RESOURCES ASSIGNED:\n"
+        "• Engine 331 (Pumper) — ETA 3 min\n"
+        "• Aerial 332 — ETA 4 min\n"
+        "• Rescue 334 — ETA 5 min\n"
+        "• District Chief 33 — ETA 6 min\n\n"
+        "HAZARDS: Structural compromise risk on floor 3. Gas main adjacent (12m south).\n\n"
+        "HYDRANT ACCESS: Hydrant #TOR-4421 at 38m (status: active). "
+        "Secondary: Hydrant #TOR-4418 at 95m.\n\n"
+        "TACTICAL NOTES: Establish command at Parliament/Dundas. "
+        "Request TPS traffic control for eastbound Dundas closure."
+    ),
+    "urgency": "HIGH",
+    "vision": {
+        "hazard_type": "structure_fire",
+        "severity_scale": 8,
+        "structural_risk": True,
+        "fire_visible": True,
+        "smoke_color": "dark_grey",
+        "water_depth_m": None,
+        "location_cues": "Multi-unit residential, east facade",
+    },
+    "spatial": {
+        "closest_hydrants": [
+            {"id": "TOR-4421", "distance_meters": 38, "lat": 43.6535, "lng": -79.3628, "status": "active"},
+            {"id": "TOR-4418", "distance_meters": 95, "lat": 43.6540, "lng": -79.3620, "status": "active"},
+            {"id": "TOR-4425", "distance_meters": 152, "lat": 43.6528, "lng": -79.3645, "status": "active"},
+        ],
+        "nearby_buildings": [
+            {"address": "45 Parliament St", "type": "residential", "floors": 4, "year_built": 1962, "evaluation_score": 68},
+        ],
+    },
+}
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _whisper_model, _kokoro_model
+
+    if MOCK_MODE:
+        logger.info("MOCK_MODE active — skipping model and spatial data loading")
+        yield
+        logger.info("Shutting down (mock mode)")
+        return
 
     logger.info("Loading Toronto Open Data into memory...")
     toronto_loader.load_all()
@@ -130,8 +182,11 @@ def _build_initial_state(req: IncidentRequest) -> AgentState:
 
 @app.get("/api/health")
 async def health():
+    if MOCK_MODE:
+        return {"status": "ok", "mock_mode": True}
     return {
         "status": "ok",
+        "mock_mode": False,
         "models_loaded": {
             "whisper": _whisper_model is not None,
             "kokoro": _kokoro_model is not None,
@@ -145,6 +200,10 @@ async def health():
 
 @app.post("/api/incident")
 async def process_incident(req: IncidentRequest):
+    if MOCK_MODE:
+        await asyncio.sleep(1.5)
+        return MOCK_INCIDENT_RESPONSE
+
     initial_state = _build_initial_state(req)
     result = await civic_vox_engine.ainvoke(initial_state)
 
@@ -171,6 +230,40 @@ async def websocket_stream(websocket: WebSocket):
         while True:
             data = await websocket.receive_json()
 
+            if MOCK_MODE:
+                ts = lambda: datetime.datetime.utcnow().isoformat() + "Z"
+
+                await asyncio.sleep(0.5)
+                await websocket.send_json({
+                    "node": "orchestrator", "status": "complete",
+                    "timestamp": ts(), "data": {},
+                })
+
+                await asyncio.sleep(1.0)
+                await websocket.send_json({
+                    "node": "vision", "status": "complete",
+                    "timestamp": ts(),
+                    "data": {"vision_analysis": MOCK_INCIDENT_RESPONSE["vision"]},
+                })
+
+                await asyncio.sleep(0.8)
+                await websocket.send_json({
+                    "node": "localizer", "status": "complete",
+                    "timestamp": ts(),
+                    "data": {"spatial_data_results": MOCK_INCIDENT_RESPONSE["spatial"]},
+                })
+
+                await asyncio.sleep(1.2)
+                await websocket.send_json({
+                    "node": "compiler", "status": "complete",
+                    "timestamp": ts(),
+                    "data": {
+                        "final_dispatch_report": MOCK_INCIDENT_RESPONSE["report"],
+                        "urgency_level": MOCK_INCIDENT_RESPONSE["urgency"],
+                    },
+                })
+                continue
+
             req = IncidentRequest(
                 transcript=data.get("transcript", ""),
                 frame_b64=data.get("frame_b64"),
@@ -181,7 +274,6 @@ async def websocket_stream(websocket: WebSocket):
             )
             initial_state = _build_initial_state(req)
 
-            # Stream node-completion events to the frontend
             async for event in civic_vox_engine.astream(initial_state, stream_mode="updates"):
                 for node_name, node_output in event.items():
                     msg = {
