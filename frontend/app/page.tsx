@@ -1,4 +1,5 @@
 "use client";
+import Image from "next/image";
 import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { useTheme } from "next-themes";
@@ -229,7 +230,8 @@ export default function Dashboard() {
           <>
             {/* Top bar */}
             <div style={{ position: "absolute", top: 0, left: 0, right: 0, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", background: "rgba(0,0,0,0.6)", backdropFilter: "blur(8px)" }}>
-              <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <Image src="/logo.png" alt="Delation" width={22} height={22} style={{ mixBlendMode: "screen" }} />
                 <span style={{ fontWeight: 700, fontSize: 14, color: "#fff" }}>Delation</span>
                 {liveGps && (
                   <span style={{ fontSize: 10, color: "#9ca3af", marginLeft: 8, fontFamily: "monospace" }}>
@@ -265,9 +267,18 @@ export default function Dashboard() {
         <div style={{ width: 320, flexShrink: 0, display: "flex", flexDirection: "column", borderLeft: "1px solid var(--border)", height: "100%", background: "var(--bg-sidebar)", overflowY: "auto" }}>
           {/* Header */}
           <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <div>
-              <h1 style={{ fontWeight: 700, fontSize: 14, letterSpacing: "0.05em", color: "var(--text)", margin: 0 }}>Delation</h1>
-              <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0 }}>Urban Risk Intelligence · Toronto</p>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <Image
+                src="/logo.png"
+                alt="Delation"
+                width={46}
+                height={46}
+                style={{ mixBlendMode: "screen", filter: "drop-shadow(0 0 4px rgba(59,130,246,0.8))", flexShrink: 0, borderRadius: "50%", transform: "translateY(-3px)" }}
+              />
+              <div style={{ display: "flex", flexDirection: "column", justifyContent: "center" }}>
+                <h1 style={{ fontWeight: 700, fontSize: 14, letterSpacing: "0.05em", color: "var(--text)", margin: 0, lineHeight: 1.2 }}>Delation</h1>
+                <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0, lineHeight: 1.2 }}>Urban Risk Intelligence · Toronto</p>
+              </div>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               {liveGps && (

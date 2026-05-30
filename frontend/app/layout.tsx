@@ -8,10 +8,14 @@ export const metadata: Metadata = {
   description: "Local-first edge AI for the City of Toronto — powered by NVIDIA GB10",
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body>
+      <body className="bg-gray-900 text-white">
         <ThemeProvider attribute="class" defaultTheme="dark" enableSystem={false}>
           {children}
         </ThemeProvider>
