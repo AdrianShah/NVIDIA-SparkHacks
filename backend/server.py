@@ -542,6 +542,24 @@ async def environmental_risk(
     return await get_environmental_risk(lat, lng)
 
 
+class TranscribeRequest(BaseModel):
+    audio_b64: str
+    format: str = "m4a"
+
+
+@app.post("/api/transcribe")
+async def transcribe_endpoint(req: TranscribeRequest):
+    if not req.audio_b64:
+        return {"text": ""}
+    try:
+        audio_bytes = base64.b64decode(req.audio_b64)
+        text = await asyncio.to_thread(transcribe_audio, audio_bytes, req.format)
+        return {"text": text.strip()}
+    except Exception as exc:
+        logger.warning("Transcribe error: %s", exc)
+        return {"text": ""}
+
+
 @app.post("/api/synthesize")
 async def synthesize(req: SynthesizeRequest):
     started_at = time.perf_counter()
