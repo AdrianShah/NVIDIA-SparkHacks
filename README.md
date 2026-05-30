@@ -122,7 +122,7 @@ npm run dev
 
 `GET /api/environmental-risk?lat=43.6532&lng=-79.3832` combines hourly-refreshed TRCA regulatory floodplain exposure, five-minute Environment Canada GeoMet weather alerts, and five-minute supplemental current conditions from Open-Meteo. Each upstream result includes freshness and stale-cache metadata. These feeds are anonymous and do not require API keys.
 
-`GET /api/risk-map` returns locally computed predictive ward risk summaries. `POST /api/incident` keeps its original response fields and adds ward risk, compound risk factors, prediction-confirmation escalation, and measured gateway performance metadata.
+`GET /api/risk-map` returns predictive **neighbourhood risk zones** scored from historic City of Toronto open data (311 flood requests, RentSafeTO building evaluations, neighbourhood boundaries, and the local flood susceptibility raster). `POST /api/incident` keeps its original response fields and adds zone baseline risk, compound risk factors, prediction-confirmation escalation, and measured gateway performance metadata.
 
 ### Frontend (`.env.local`)
 
@@ -142,6 +142,8 @@ npm run dev
 | Apartment Building Evaluations (RentSafeTO) | JSON/CSV | `open.toronto.ca/dataset/apartment-building-evaluation` |
 | Street Centreline | GeoJSON | `open.toronto.ca/dataset/toronto-centreline-tcl` |
 | 311 Service Requests | CSV | `open.toronto.ca/dataset/311-service-requests-customer-initiated` |
+| Neighbourhood boundaries | GeoJSON | City of Toronto neighbourhood file (`toronto-neighbourhoods.geojson` in `backend/data/`) |
+| Flood susceptibility (model layer) | GeoTIFF | `flood-susceptibility-toronto.tif` in `backend/data/` |
 
 ---
 

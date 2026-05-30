@@ -27,6 +27,80 @@ def test_health_reports_contract_shape():
     }
 
 
+def test_incident_hitl_predict_finalize_flow():
+    payload = {
+        "frame_b64": "abc123",
+        "gps": {"lat": 43.6629, "lng": -79.3957},
+    }
+
+    with _client() as client:
+        predict = client.post("/api/incident/predict", json=payload)
+        assert predict.status_code == 200
+        body = predict.json()
+        assert {"prediction_id", "hazard_type", "confidence"} <= set(body)
+        assert body["hazard_type"] == "Flooding"
+        assert 0 <= body["confidence"] <= 1
+
+        finalize = client.post("/api/incident/finalize", json={
+            "prediction_id": body["prediction_id"],
+            "confirmed": True,
+            "gps": payload["gps"],
+        })
+        assert finalize.status_code == 200
+        result = finalize.json()
+        assert result["urgency"] == "CRITICAL"
+        assert "report" in result
+
+        listed = client.get("/api/incidents")
+        assert listed.status_code == 200
+        assert len(listed.json()["incidents"]) >= 1
+
+
+def test_incident_finalize_requires_correction_when_not_confirmed():
+    with _client() as client:
+        predict = client.post("/api/incident/predict", json={
+            "frame_b64": "abc123",
+            "gps": {"lat": 43.6629, "lng": -79.3957},
+        })
+        prediction_id = predict.json()["prediction_id"]
+
+        bad = client.post("/api/incident/finalize", json={
+            "prediction_id": prediction_id,
+            "confirmed": False,
+            "gps": {"lat": 43.6629, "lng": -79.3957},
+        })
+        assert bad.status_code == 422
+
+        ok = client.post("/api/incident/finalize", json={
+            "prediction_id": prediction_id,
+            "confirmed": False,
+            "user_correction": "Gas leak near the curb, not flooding",
+            "gps": {"lat": 43.6629, "lng": -79.3957},
+        })
+        assert ok.status_code == 200
+        assert ok.json()["urgency"] == "CRITICAL"
+
+
+def test_incidents_feed_syncs_across_clients():
+    payload = {
+        "transcript": "Flooding at intersection",
+        "gps": {"lat": 43.6532, "lng": -79.3832},
+    }
+
+    with _client() as client:
+        post = client.post("/api/incident", json=payload)
+        assert post.status_code == 200
+        listed = client.get("/api/incidents")
+
+    assert listed.status_code == 200
+    incidents = listed.json()["incidents"]
+    assert len(incidents) >= 1
+    latest = incidents[0]
+    assert latest["transcript"] == payload["transcript"]
+    assert latest["gps"]["lat"] == payload["gps"]["lat"]
+    assert "id" in latest and "timestamp" in latest
+
+
 def test_mock_incident_preserves_section_10_shape():
     payload = {
         "transcript": "There is flooding in my basement",

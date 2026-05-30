@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 600">
+  <defs>
+    <linearGradient id="pinGradient" x1="160" y1="90" x2="470" y2="460">
+      <stop offset="0%" stop-color="#002B9E"/>
+      <stop offset="55%" stop-color="#005CFF"/>
+      <stop offset="100%" stop-color="#19B7FF"/>
+    </linearGradient>
+
+    <linearGradient id="shieldGradient" x1="260" y1="165" x2="380" y2="345">
+      <stop offset="0%" stop-color="#0A2B88"/>
+      <stop offset="100%" stop-color="#287BFF"/>
+    </linearGradient>
+
+    <linearGradient id="alertGradient" x1="320" y1="190" x2="320" y2="310">
+      <stop offset="0%" stop-color="#FFB13B"/>
+      <stop offset="100%" stop-color="#FF571F"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Speed lines -->
+  <g fill="#116BFF">
+    <rect x="125" y="235" width="50" height="10" rx="5"/>
+    <rect x="165" y="252" width="45" height="10" rx="5"/>
+    <rect x="105" y="270" width="75" height="10" rx="5"/>
+    <rect x="145" y="288" width="92" height="10" rx="5"/>
+    <rect x="115" y="308" width="48" height="10" rx="5"/>
+    <rect x="165" y="325" width="66" height="10" rx="5"/>
+  </g>
+
+  <!-- Location pin -->
+  <path fill="url(#pinGradient)" d="
+    M320 80
+    C235 80 170 145 170 225
+    C170 295 222 352 320 460
+    C418 352 470 295 470 225
+    C470 145 405 80 320 80Z
+  "/>
+
+  <!-- Inner cutout -->
+  <path fill="#020817" d="
+    M320 130
+    C260 130 215 175 215 230
+    C215 278 250 318 320 395
+    C390 318 425 278 425 230
+    C425 175 380 130 320 130Z
+  "/>
+
+  <!-- Shield -->
+  <path fill="url(#shieldGradient)" d="
+    M320 165
+    L380 188
+    L380 252
+    C380 294 353 325 320 343
+    C287 325 260 294 260 252
+    L260 188
+    Z
+  "/>
+
+  <!-- Alert mark -->
+  <rect x="307" y="198" width="26" height="72" rx="13" fill="url(#alertGradient)"/>
+  <circle cx="320" cy="296" r="15" fill="url(#alertGradient)"/>
+</svg>

@@ -1,9 +1,10 @@
+import { Audio, Video, ResizeMode } from "expo-av";
 import { CameraView, useCameraPermissions } from "expo-camera";
-import { useAudioRecorder, AudioModule, RecordingPresets } from "expo-audio";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Location from "expo-location";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
+  ActivityIndicator,
   Dimensions, Image, KeyboardAvoidingView, Modal, Platform, ScrollView,
   StatusBar, StyleSheet, Text, TextInput, TouchableOpacity, View,
 } from "react-native";
@@ -12,8 +13,20 @@ import MapView, { WardScore, BuildingPoint, SpatialData } from "./components/Map
 import AgentCard, { NodeStatus } from "./components/AgentCard";
 import CameraCapture from "./components/CameraCapture";
 import DispatchReport from "./components/DispatchReport";
+import { mapSharedIncidents, type SharedIncident } from "./lib/incidents";
+import {
+  finalizeIncident,
+  IncidentFlowError,
+  predictIncident,
+  wardRiskScore,
+  type FinalizeResult,
+  type PredictResult,
+} from "./lib/incident-flow";
+import { normalizeWards } from "./lib/wards";
+import PredictionConfirmationCard from "./components/PredictionConfirmationCard";
+import { API_URL as CONFIGURED_API_URL } from "./config/api";
 
-const API_URL = process.env.EXPO_PUBLIC_API_URL ?? "http://localhost:8080";
+const API_URL = CONFIGURED_API_URL || "http://localhost:8080";
 const { height: SCREEN_HEIGHT } = Dimensions.get("window");
 
 type UrgencyLevel = "LOW" | "HIGH" | "CRITICAL";
@@ -29,7 +42,7 @@ const INITIAL_NODES: AgentNodeDef[] = [
 const MODEL_LABELS: Record<string, string> = {
   orchestrator: "Mistral Nemotron",
   vision:       "Llama 4 Maverick",
-  localizer:    "GeoPandas · GPU",
+  localizer:    "GeoPandas ? GPU",
   compiler:     "Nemotron 30B",
 };
 
@@ -37,20 +50,8 @@ const RISK_COLOR: Record<string, string> = {
   CRITICAL: "#ef4444", HIGH: "#f97316", ELEVATED: "#eab308", LOW: "#22c55e",
 };
 
-const MOCK_WARDS: WardScore[] = [
-  { id: "1", name: "Etobicoke North",          score: 87, lat: 43.7380, lng: -79.5765, risk_level: "CRITICAL", in_flood_zone: true,  prior_311: 6, watermain_age: 72 },
-  { id: "2", name: "York South-Weston",        score: 74, lat: 43.7050, lng: -79.4850, risk_level: "HIGH",     in_flood_zone: true,  prior_311: 4, watermain_age: 55 },
-  { id: "3", name: "Parkdale-High Park",       score: 62, lat: 43.6550, lng: -79.4650, risk_level: "HIGH",     in_flood_zone: false, prior_311: 3, watermain_age: 48 },
-  { id: "4", name: "Scarborough Southwest",    score: 55, lat: 43.7350, lng: -79.2350, risk_level: "ELEVATED", in_flood_zone: false, prior_311: 2, watermain_age: 30 },
-  { id: "5", name: "Downtown Core",            score: 45, lat: 43.6700, lng: -79.3900, risk_level: "ELEVATED", in_flood_zone: false, prior_311: 2, watermain_age: 60 },
-  { id: "6", name: "North York Centre",        score: 30, lat: 43.7615, lng: -79.4111, risk_level: "LOW",      in_flood_zone: false, prior_311: 1, watermain_age: 15 },
-  { id: "7", name: "Scarborough North",        score: 68, lat: 43.7900, lng: -79.2600, risk_level: "HIGH",     in_flood_zone: false, prior_311: 3, watermain_age: 40 },
-  { id: "8", name: "Humber River-Black Creek", score: 72, lat: 43.7200, lng: -79.5200, risk_level: "HIGH",     in_flood_zone: true,  prior_311: 5, watermain_age: 58 },
-];
-
-
 export default function App() {
-  // ── Theme ────────────────────────────────────────────────────────────────────
+  // ?? Theme ????????????????????????????????????????????????????????????????????
   const [isDark, setIsDark] = useState(true);
   const theme = {
     bg:      isDark ? "#050F14" : "#f8fafc",
@@ -62,10 +63,10 @@ export default function App() {
     teal:    isDark ? "#2dd4bf" : "#0d9488",
   };
 
-  // ── State ─────────────────────────────────────────────────────────────────────
+  // ?? State ?????????????????????????????????????????????????????????????????????
   const [gps, setGps]             = useState({ lat: 43.6532, lng: -79.3832 });
-  const [wardScores, setWardScores] = useState<WardScore[]>(MOCK_WARDS);
-  const [buildings,  setBuildings]  = useState<BuildingPoint[]>([]);
+  const [wardScores, setWardScores] = useState<WardScore[]>([]);
+  const [buildings, setBuildings] = useState<BuildingPoint[]>([]);
   const [selectedWard, setSelectedWard] = useState<WardScore | null>(null);
   const [incidents, setIncidents]  = useState<any[]>([]);
   const [nodes, setNodes]          = useState<AgentNodeDef[]>(INITIAL_NODES);
@@ -76,12 +77,14 @@ export default function App() {
   const [wardRisk, setWardRisk]    = useState<{ score: number; escalated: boolean } | null>(null);
   const [showReportModal, setShowReportModal] = useState(false);
   const [confirmedCount, setConfirmedCount]   = useState(0);
+  const [capturePaused, setCapturePaused]     = useState(false);
 
   const currentFrameRef  = useRef<string | null>(null);
   const isProcessingRef  = useRef(false);
+  const recordingRef     = useRef<Audio.Recording | null>(null);
   const watchIdRef       = useRef<Location.LocationSubscription | null>(null);
 
-  // ── Live GPS ──────────────────────────────────────────────────────────────────
+  // ?? Live GPS ??????????????????????????????????????????????????????????????????
   useEffect(() => {
     (async () => {
       const { status } = await Location.requestForegroundPermissionsAsync();
@@ -98,83 +101,124 @@ export default function App() {
     return () => { watchIdRef.current?.remove(); };
   }, []);
 
-  // ── Fetch ward scores ─────────────────────────────────────────────────────────
-  useEffect(() => {
+  // ?? Fetch ward scores (live backend only) ?????????????????????????????????????
+  const refreshRiskMap = useCallback(() => {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 4000); // 4s timeout
+    const timer = setTimeout(() => ctrl.abort(), 8000);
     fetch(`${API_URL}/api/risk-map`, { signal: ctrl.signal })
       .then((r) => r.json())
-      .then((d) => { if (d.wards?.length) setWardScores(d.wards); })
-      .catch(() => {})
+      .then((d) => setWardScores(normalizeWards(d.wards ?? [])))
+      .catch(() => setWardScores([]))
       .finally(() => clearTimeout(timer));
-    fetch(`${API_URL}/api/buildings`)
+    fetch(`${API_URL}/api/buildings`, { signal: ctrl.signal })
       .then((r) => r.json())
       .then((d) => { if (d.buildings?.length) setBuildings(d.buildings); })
       .catch(() => {});
   }, []);
 
-  // ── Submit incident ───────────────────────────────────────────────────────────
-  const submitIncident = useCallback(async (transcript: string) => {
-    if (isProcessingRef.current) return;
+  useEffect(() => {
+    refreshRiskMap();
+    const interval = setInterval(refreshRiskMap, 30000);
+    return () => clearInterval(interval);
+  }, [refreshRiskMap]);
+
+  // ?? Sync incidents with web dashboard (shared backend feed) ???????????????????
+  useEffect(() => {
+    let cancelled = false;
+    const sync = () => {
+      fetch(`${API_URL}/api/incidents`)
+        .then((r) => r.json())
+        .then((d) => {
+          if (cancelled) return;
+          setIncidents(mapSharedIncidents((d.incidents ?? []) as SharedIncident[]));
+        })
+        .catch(() => {});
+    };
+    sync();
+    const interval = setInterval(sync, 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
+  const stopRecording = useCallback(async () => {
+    const rec = recordingRef.current;
+    recordingRef.current = null;
+    if (!rec) return;
+    try { await rec.stopAndUnloadAsync(); } catch {}
+  }, []);
+
+  // ?? Apply finalized dispatch report to dashboard state ???????????????????????
+  const applyFinalizeResult = useCallback(async (data: FinalizeResult) => {
+    if (data.legitimate === false) {
+      setNodes(INITIAL_NODES.map((n) => ({
+        ...n, status: "error",
+        detail: n.name === "orchestrator" ? "Not verified" : "",
+      })));
+      setReport("? Report not verified. Please provide more detail.");
+      return;
+    }
+
+    setNodes(INITIAL_NODES.map((n) => ({
+      ...n, status: "complete",
+      detail: n.name === "vision"    ? `${(data.vision as { hazard_type?: string })?.hazard_type ?? ""} ? ${(data.vision as { severity_scale?: number })?.severity_scale ?? "?"}/10`
+            : n.name === "localizer" ? `Hydrant: ${(data.spatial as { closest_hydrants?: { distance_meters?: number }[] })?.closest_hydrants?.[0]?.distance_meters ?? "?"}m`
+            : n.name === "compiler"  ? `Risk: ${wardRiskScore(data.ward_risk).toFixed(0)}${data.escalated ? " ?" : ""}`
+            : "",
+    })));
+    setReport(data.report ?? "");
+    setUrgency((data.urgency as UrgencyLevel) ?? "HIGH");
+    setSpatial((data.spatial ?? null) as SpatialData | null);
+    const score = wardRiskScore(data.ward_risk);
+    setWardRisk({ score, escalated: data.escalated ?? false });
+    if (data.escalated) setConfirmedCount((c) => c + 1);
+
+    fetch(`${API_URL}/api/incidents`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.incidents) setIncidents(mapSharedIncidents(d.incidents as SharedIncident[]));
+      })
+      .catch(() => {});
+
+    refreshRiskMap();
+  }, [refreshRiskMap]);
+
+  const resetProcessingState = useCallback(() => {
+    setIsProcessing(false);
+    setCapturePaused(false);
+    isProcessingRef.current = false;
+  }, []);
+
+  const beginFinalizePipeline = useCallback(() => {
     isProcessingRef.current = true;
     setIsProcessing(true);
+    setCapturePaused(true);
     setNodes(INITIAL_NODES.map((n) => ({ ...n, status: "idle", detail: "" })));
     setNodes((p) => p.map((n) => n.name === "orchestrator" ? { ...n, status: "active" } : n));
+  }, []);
 
+  const handleHitlComplete = useCallback(async (data: FinalizeResult) => {
     try {
-      const res = await fetch(`${API_URL}/api/incident`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ transcript, frame_b64: currentFrameRef.current ?? "", gps }),
-      });
-      const data = await res.json();
-
-      if (data.legitimate === false) {
-        setNodes(INITIAL_NODES.map((n) => ({
-          ...n, status: "error",
-          detail: n.name === "orchestrator" ? "Not verified" : "",
-        })));
-        setReport("⚠ Report not verified. Please provide more detail.");
-        return;
-      }
-
-      setNodes(INITIAL_NODES.map((n) => ({
-        ...n, status: "complete",
-        detail: n.name === "vision"    ? `${data.vision?.hazard_type ?? ""} · ${data.vision?.severity_scale ?? "?"}/10`
-              : n.name === "localizer" ? `Hydrant: ${data.spatial?.closest_hydrants?.[0]?.distance_meters ?? "?"}m`
-              : n.name === "compiler"  ? `Risk: ${data.ward_risk?.toFixed(0) ?? "?"}${data.escalated ? " ⚠" : ""}`
-              : "",
-      })));
-      setReport(data.report ?? "");
-      setUrgency((data.urgency as UrgencyLevel) ?? "HIGH");
-      setSpatial(data.spatial ?? null);
-      setWardRisk({ score: data.ward_risk ?? 0, escalated: data.escalated ?? false });
-      if (data.escalated) setConfirmedCount((c) => c + 1);
-      setIncidents((p) => [...p, { lat: gps.lat, lng: gps.lng, urgency: data.urgency ?? "HIGH", transcript }]);
-
-      // Refresh ward scores
-      fetch(`${API_URL}/api/risk-map`).then((r) => r.json()).then((d) => { if (d.wards?.length) setWardScores(d.wards); });
-    } catch {
-      setNodes((p) => p.map((n) => n.status === "active" ? { ...n, status: "error" } : n));
+      await applyFinalizeResult(data);
     } finally {
-      setIsProcessing(false);
-      isProcessingRef.current = false;
+      resetProcessingState();
+      setShowReportModal(false);
     }
-  }, [gps]);
+  }, [applyFinalizeResult, resetProcessingState]);
+
+  const handleHitlError = useCallback(() => {
+    setNodes((p) => p.map((n) => n.status === "active" ? { ...n, status: "error" } : n));
+    resetProcessingState();
+  }, [resetProcessingState]);
 
   const handleReportPress = () => setShowReportModal(true);
-
-  const handleReportSubmit = async (transcript: string, frameB64: string) => {
-    setShowReportModal(false);
-    currentFrameRef.current = frameB64 || currentFrameRef.current;
-    await submitIncident(transcript || "Emergency incident reported at this location");
-  };
 
   return (
     <SafeAreaView style={[styles.root, { backgroundColor: theme.bg }]}>
       <StatusBar barStyle={isDark ? "light-content" : "dark-content"} backgroundColor={theme.bg} />
 
-      {/* ── Map (top 48%) ── */}
+      {/* ?? Map (top 48%) ?? */}
       <View style={styles.mapContainer}>
         <MapView
           gps={gps}
@@ -188,10 +232,14 @@ export default function App() {
           onWardPress={setSelectedWard}
         />
 
-        {/* Camera preview — only shown when actively processing */}
+        {/* Camera preview ? only shown when actively processing */}
         {isProcessing && (
           <View style={styles.cameraOverlay}>
-            <CameraCapture isActive={isProcessing} onFrame={(f) => { currentFrameRef.current = f; }} />
+            <CameraCapture
+              isActive={isProcessing}
+              paused={capturePaused}
+              onFrame={(f) => { currentFrameRef.current = f; }}
+            />
           </View>
         )}
 
@@ -200,20 +248,20 @@ export default function App() {
           <View>
             <Text style={[styles.appTitle, { color: theme.teal }]}>DELATION</Text>
             <Text style={[styles.appSubtitle, { color: theme.muted }]}>
-              📍 {gps.lat.toFixed(4)}, {gps.lng.toFixed(4)}
+              ?? {gps.lat.toFixed(4)}, {gps.lng.toFixed(4)}
             </Text>
           </View>
           <View style={styles.topBarRight}>
             {confirmedCount > 0 && (
               <View style={styles.confirmedBadge}>
-                <Text style={styles.confirmedText}>✓ {confirmedCount}</Text>
+                <Text style={styles.confirmedText}>? {confirmedCount}</Text>
               </View>
             )}
             <TouchableOpacity
               onPress={() => setIsDark((d) => !d)}
               style={[styles.themeBtn, { backgroundColor: "rgba(0,0,0,0.4)", borderColor: theme.teal }]}
             >
-              <Text style={{ fontSize: 14 }}>{isDark ? "☀️" : "🌙"}</Text>
+              <Text style={{ fontSize: 14 }}>{isDark ? "??" : "??"}</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -225,11 +273,11 @@ export default function App() {
           disabled={isProcessing}
           activeOpacity={0.8}
         >
-          <Text style={styles.reportBtnText}>{isProcessing ? "PROCESSING…" : "▶ REPORT INCIDENT"}</Text>
+          <Text style={styles.reportBtnText}>{isProcessing ? "PROCESSING?" : "? REPORT INCIDENT"}</Text>
         </TouchableOpacity>
       </View>
 
-      {/* ── Bottom panel ── */}
+      {/* ?? Bottom panel ?? */}
       <View style={[styles.panel, { backgroundColor: theme.bgPanel, borderTopColor: theme.border }]}>
 
         {/* Ward risk banner */}
@@ -239,7 +287,7 @@ export default function App() {
               <Text style={[styles.wardBannerLabel, { color: theme.muted }]}>WARD RISK SCORE</Text>
               {wardRisk.escalated && (
                 <View style={styles.escalatedBadge}>
-                  <Text style={styles.escalatedText}>⚠ PREDICTION CONFIRMED</Text>
+                  <Text style={styles.escalatedText}>? PREDICTION CONFIRMED</Text>
                 </View>
               )}
             </View>
@@ -260,7 +308,7 @@ export default function App() {
           {/* Top wards list */}
           {wardScores.length > 0 && (
             <View style={styles.section}>
-              <Text style={[styles.sectionLabel, { color: theme.muted }]}>── WARD RISK BRIEFING</Text>
+              <Text style={[styles.sectionLabel, { color: theme.muted }]}>?? WARD RISK BRIEFING</Text>
               {wardScores.slice(0, 4).map((w) => (
                 <TouchableOpacity
                   key={w.id}
@@ -277,7 +325,7 @@ export default function App() {
 
           {/* Agent pipeline */}
           <View style={styles.section}>
-            <Text style={[styles.sectionLabel, { color: theme.muted }]}>── AGENT PIPELINE</Text>
+            <Text style={[styles.sectionLabel, { color: theme.muted }]}>?? AGENT PIPELINE</Text>
             <View style={styles.agentRow}>
               <AgentCard {...nodes[0]} detail={nodes[0].detail || MODEL_LABELS.orchestrator} />
               <AgentCard {...nodes[1]} detail={nodes[1].detail || MODEL_LABELS.vision} />
@@ -290,7 +338,7 @@ export default function App() {
 
           {/* Dispatch report */}
           <View style={styles.section}>
-            <Text style={[styles.sectionLabel, { color: theme.muted }]}>── DISPATCH PROTOCOL</Text>
+            <Text style={[styles.sectionLabel, { color: theme.muted }]}>?? DISPATCH PROTOCOL</Text>
             <View style={[styles.reportBox, { borderColor: theme.border }]}>
               <DispatchReport report={report} isProcessing={isProcessing} />
             </View>
@@ -300,7 +348,7 @@ export default function App() {
         </ScrollView>
       </View>
 
-      {/* ── Zone detail modal ── */}
+      {/* ?? Zone detail modal ?? */}
       <Modal visible={!!selectedWard} transparent animationType="slide" onRequestClose={() => setSelectedWard(null)}>
         <TouchableOpacity style={styles.modalBackdrop} activeOpacity={1} onPress={() => setSelectedWard(null)} />
         {selectedWard && (
@@ -311,7 +359,7 @@ export default function App() {
                 <Text style={[styles.riskPillText, { color: RISK_COLOR[selectedWard.risk_level] }]}>{selectedWard.risk_level}</Text>
               </View>
               <TouchableOpacity onPress={() => setSelectedWard(null)}>
-                <Text style={[styles.closeBtn, { color: theme.muted }]}>✕</Text>
+                <Text style={[styles.closeBtn, { color: theme.muted }]}>?</Text>
               </TouchableOpacity>
             </View>
 
@@ -351,46 +399,147 @@ export default function App() {
         )}
       </Modal>
 
-      {/* ── Report incident modal ── */}
+      {/* ?? Report incident modal ?? */}
       <Modal visible={showReportModal} transparent animationType="slide" onRequestClose={() => setShowReportModal(false)}>
         <ReportIncidentSheet
           theme={theme}
           gps={gps}
-          onSubmit={handleReportSubmit}
           onCancel={() => setShowReportModal(false)}
+          onPredictionReady={() => {
+            setIsProcessing(true);
+            setCapturePaused(true);
+          }}
+          onBeginFinalize={beginFinalizePipeline}
+          onComplete={handleHitlComplete}
+          onError={handleHitlError}
+          onScannerReset={resetProcessingState}
+          stopRecording={stopRecording}
         />
       </Modal>
     </SafeAreaView>
   );
 }
 
-// ── Report sheet ─────────────────────────────────────────────────────────────
+// ?? Report sheet ?????????????????????????????????????????????????????????????
+type VideoState = "idle" | "recording" | "paused" | "preview" | "kept";
 type PhotoState = "idle" | "preview" | "kept";
+type CardPhase = "confirm" | "correct" | "finalizing" | "error";
 
-function ReportIncidentSheet({ theme, gps, onSubmit, onCancel }: {
+function ReportIncidentSheet({ theme, gps, onCancel, onPredictionReady, onBeginFinalize, onComplete, onError, onScannerReset, stopRecording }: {
   theme: any;
   gps: { lat: number; lng: number };
-  onSubmit: (transcript: string, frameB64: string) => void;
   onCancel: () => void;
+  onPredictionReady: () => void;
+  onBeginFinalize: () => void;
+  onComplete: (data: FinalizeResult) => void;
+  onError: () => void;
+  onScannerReset: () => void;
+  stopRecording: () => Promise<void>;
 }) {
-  const [text, setText]               = useState("");
-  const [photoState, setPhotoState]   = useState<PhotoState>("idle");
-  const [photoUri, setPhotoUri]       = useState<string | null>(null);
-  const [micActive, setMicActive]     = useState(false);
-  const [micSecs, setMicSecs]         = useState(0);
+  const [text, setText]           = useState("");
+  const [camMode, setCamMode]     = useState<"photo" | "video">("photo");
+  const [photoState, setPhotoState] = useState<PhotoState>("idle");
+  const [photoUri, setPhotoUri]   = useState<string | null>(null);
+  const [videoState, setVideoState] = useState<VideoState>("idle");
+  const [videoUri, setVideoUri]   = useState<string | null>(null);
+  const [videoSecs, setVideoSecs] = useState(0);
+  const [micActive, setMicActive] = useState(false);
+  const [micSecs, setMicSecs]     = useState(0);
   const [transcribing, setTranscribing] = useState(false);
+  const [prediction, setPrediction]     = useState<PredictResult | null>(null);
+  const [cardPhase, setCardPhase]       = useState<CardPhase>("confirm");
+  const [flowError, setFlowError]       = useState("");
+  const [predicting, setPredicting]     = useState(false);
 
   const [permission] = useCameraPermissions();
-  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
-  const cameraRef   = useRef<CameraView>(null);
-  const frameB64Ref = useRef<string>("");
-  const micTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const chunkTimer  = useRef<ReturnType<typeof setInterval> | null>(null);
+  const cameraRef     = useRef<CameraView>(null);
+  const frameB64Ref   = useRef<string>("");
+  const chunkAudioRef = useRef<Audio.Recording | null>(null);
+  const videoTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const micTimerRef   = useRef<ReturnType<typeof setInterval> | null>(null);
+  const chunkTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fmt = (s: number) =>
     `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 
-  // ── 1. PHOTO ─────────────────────────────────────────────────────────────────
+  const clearPrediction = () => {
+    setPrediction(null);
+    setCardPhase("confirm");
+    setFlowError("");
+    setPredicting(false);
+  };
+
+  const resetToScannerView = () => {
+    clearPrediction();
+    setPhotoUri(null);
+    setPhotoState("idle");
+    setVideoUri(null);
+    setVideoState("idle");
+    frameB64Ref.current = "";
+    onScannerReset();
+  };
+
+  const friendlyFlowError = (err: unknown, phase: "predict" | "finalize"): string => {
+    if (err instanceof IncidentFlowError) {
+      if (phase === "finalize" && err.status === 404) {
+        return "Session expired ? snap a new frame to continue.";
+      }
+      if (phase === "finalize" && err.status === 422) {
+        return "Describe the hazard before submitting your correction.";
+      }
+      return err.message;
+    }
+    if (phase === "finalize") {
+      return "Report compilation failed ? snap a new frame to continue.";
+    }
+    return err instanceof Error ? err.message : "Prediction failed";
+  };
+
+  const runPredict = async (frameB64: string) => {
+    if (!frameB64 || predicting) return;
+    setPredicting(true);
+    setFlowError("");
+    try {
+      const result = await predictIncident(frameB64, gps);
+      setPrediction(result);
+      setCardPhase("confirm");
+      onPredictionReady();
+    } catch (err) {
+      setFlowError(friendlyFlowError(err, "predict"));
+      setCardPhase("error");
+    } finally {
+      setPredicting(false);
+    }
+  };
+
+  const runFinalize = async (confirmed: boolean, userCorrection?: string) => {
+    if (!prediction || cardPhase === "finalizing") return;
+    if (!confirmed && !(userCorrection ?? "").trim()) return;
+    setCardPhase("finalizing");
+    setFlowError("");
+    onBeginFinalize();
+    await stopRecording();
+    try {
+      const data = await finalizeIncident({
+        prediction_id: prediction.prediction_id,
+        confirmed,
+        gps,
+        user_correction: userCorrection,
+      });
+      clearPrediction();
+      await onComplete(data);
+    } catch (err) {
+      setFlowError(friendlyFlowError(err, "finalize"));
+      setCardPhase("error");
+      onError();
+    }
+  };
+
+  const clearVideoTimer = () => {
+    if (videoTimerRef.current) { clearInterval(videoTimerRef.current); videoTimerRef.current = null; }
+  };
+
+  // ?? 1. PHOTO ?????????????????????????????????????????????????????????????????
   const takePhoto = async () => {
     try {
       const photo = await cameraRef.current?.takePictureAsync({ base64: true, quality: 0.8 });
@@ -398,14 +547,63 @@ function ReportIncidentSheet({ theme, gps, onSubmit, onCancel }: {
         setPhotoUri(photo.uri);
         frameB64Ref.current = photo.base64;
         setPhotoState("preview");
+        await runPredict(photo.base64);
       }
     } catch {}
   };
 
-  const keepPhoto   = () => setPhotoState("kept");
-  const retakePhoto = () => { setPhotoUri(null); frameB64Ref.current = ""; setPhotoState("idle"); };
+  const keepPhoto = () => setPhotoState("kept");
+  const retakePhoto = () => {
+    resetToScannerView();
+  };
 
-  // ── 2. SPEECH (expo-audio, 5-second chunks → backend Whisper) ────────────────
+  // ?? 2. VIDEO ??????????????????????????????????????????????????????????????????
+  const startVideoRec = async () => {
+    setVideoUri(null);
+    setVideoSecs(0);
+    setVideoState("recording");
+    videoTimerRef.current = setInterval(() => setVideoSecs(s => s + 1), 1000);
+    try {
+      const result = await cameraRef.current?.recordAsync({ maxDuration: 120 });
+      clearVideoTimer();
+      if (result?.uri) {
+        setVideoUri(result.uri);
+        setVideoState("preview");
+        // Grab a still frame for the AI submission
+        try {
+          const p = await cameraRef.current?.takePictureAsync({ base64: true, quality: 0.6 });
+          if (p?.base64) {
+            frameB64Ref.current = p.base64;
+            await runPredict(p.base64);
+          }
+        } catch {}
+      } else {
+        setVideoState("idle");
+      }
+    } catch { clearVideoTimer(); setVideoState("idle"); }
+  };
+
+  const pauseVideoRec = () => {
+    // Stop recording ? goes to paused (timer frozen, no preview yet)
+    cameraRef.current?.stopRecording();
+    clearVideoTimer();
+    setVideoState("paused");
+  };
+
+  const resumeVideoRec = () => startVideoRec();   // new segment, same UX
+
+  const stopVideoRec = () => {
+    cameraRef.current?.stopRecording();
+    clearVideoTimer();
+    // recordAsync promise resolves ? sets preview
+  };
+
+  const keepVideo = () => setVideoState("kept");
+  const redoVideo = () => {
+    resetToScannerView();
+  };
+
+  // ?? 3. SPEECH ? real-time transcript ?????????????????????????????????????????
   const transcribeChunk = async (uri: string) => {
     setTranscribing(true);
     try {
@@ -415,113 +613,235 @@ function ReportIncidentSheet({ theme, gps, onSubmit, onCancel }: {
         body: JSON.stringify({ audio_b64: b64, format: "m4a" }),
       });
       if (res.ok) {
-        const { text: t } = await res.json();
-        if (t?.trim()) setText(prev => prev ? `${prev} ${t.trim()}` : t.trim());
+        const data = await res.json();
+        if (data.text?.trim())
+          setText(prev => prev ? `${prev} ${data.text.trim()}` : data.text.trim());
       }
     } catch {}
     setTranscribing(false);
   };
 
   const startMic = async () => {
-    const status = await AudioModule.requestRecordingPermissionsAsync();
-    if (!status.granted) return;
-    await audioRecorder.prepareToRecordAsync();
-    audioRecorder.record();
-    setMicActive(true); setMicSecs(0);
-    micTimerRef.current = setInterval(() => setMicSecs(s => s + 1), 1000);
-    // Every 5 s stop → transcribe → restart
-    chunkTimer.current = setInterval(async () => {
-      try {
-        await audioRecorder.stop();
-        const uri = audioRecorder.uri;
-        if (uri) transcribeChunk(uri);
-        await audioRecorder.prepareToRecordAsync();
-        audioRecorder.record();
-      } catch {}
-    }, 5000);
+    try {
+      await Audio.requestPermissionsAsync();
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+      const { recording } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+      chunkAudioRef.current = recording;
+      setMicActive(true); setMicSecs(0);
+      micTimerRef.current = setInterval(() => setMicSecs(s => s + 1), 1000);
+      // flush chunk every 5 s
+      chunkTimerRef.current = setInterval(async () => {
+        const cur = chunkAudioRef.current;
+        if (!cur) return;
+        try {
+          await cur.stopAndUnloadAsync();
+          const uri = cur.getURI();
+          if (uri) transcribeChunk(uri);
+          const { recording: next } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+          chunkAudioRef.current = next;
+        } catch {}
+      }, 5000);
+    } catch {}
   };
 
   const stopMic = async () => {
-    if (chunkTimer.current)  { clearInterval(chunkTimer.current);  chunkTimer.current  = null; }
-    if (micTimerRef.current) { clearInterval(micTimerRef.current); micTimerRef.current = null; }
-    try {
-      await audioRecorder.stop();
-      const uri = audioRecorder.uri;
-      if (uri) await transcribeChunk(uri);
-    } catch {}
+    if (chunkTimerRef.current) { clearInterval(chunkTimerRef.current); chunkTimerRef.current = null; }
+    if (micTimerRef.current)   { clearInterval(micTimerRef.current);   micTimerRef.current   = null; }
+    const cur = chunkAudioRef.current;
+    chunkAudioRef.current = null;
+    if (cur) {
+      try {
+        await cur.stopAndUnloadAsync();
+        const uri = cur.getURI();
+        if (uri) await transcribeChunk(uri);
+      } catch {}
+    }
     setMicActive(false);
   };
 
-  // ── Submit ────────────────────────────────────────────────────────────────────
-  const handleSubmit = async () => {
+  const handleCancel = async () => {
     if (micActive) await stopMic();
-    if (!frameB64Ref.current) {
-      try {
-        const p = await cameraRef.current?.takePictureAsync({ base64: true, quality: 0.6 });
-        if (p?.base64) frameB64Ref.current = p.base64;
-      } catch {}
-    }
-    onSubmit(text || "Incident reported", frameB64Ref.current);
+    if (videoState === "recording") stopVideoRec();
+    resetToScannerView();
+    onCancel();
   };
 
-  const T = theme;
+  // Derived booleans
+  const hitlActive = !!prediction || predicting;
+  const showLiveCamera = !hitlActive && (
+    (camMode === "photo" && photoState === "idle") ||
+    (camMode === "video" && (videoState === "idle" || videoState === "recording" || videoState === "paused"))
+  );
+
+  const T = theme; // shorthand
 
   return (
     <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={{ flex: 1, justifyContent: "flex-end" }}>
-      <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={onCancel} />
+      <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={handleCancel} />
       <View style={[styles.reportSheet, { backgroundColor: T.bgCard, borderColor: T.border }]}>
         <View style={styles.zoneModalHandle} />
         <Text style={[styles.reportSheetTitle, { color: T.text }]}>Report an Incident</Text>
 
-        {/* ── Square camera area ── */}
+        {/* ?? Square media area ?? */}
         <View style={[styles.squareMedia, { borderColor: T.border }]}>
-          {photoState !== "idle" ? (
+          {predicting && (
+            <View style={styles.predictOverlay}>
+              <ActivityIndicator color={T.teal} />
+              <Text style={[styles.predictOverlayText, { color: T.teal }]}>MAVERICK ANALYZING?</Text>
+            </View>
+          )}
+
+          {/* PHOTO: idle / preview / kept */}
+          {camMode === "photo" && photoState !== "idle" && (
             <>
               <Image source={{ uri: photoUri! }} style={StyleSheet.absoluteFill} resizeMode="cover" />
               {photoState === "kept" && (
-                <View style={styles.keptBadge}><Text style={styles.keptText}>✓ Kept</Text></View>
+                <View style={styles.keptBadge}><Text style={styles.keptText}>? Kept</Text></View>
               )}
-              {photoState === "preview" && (
+              {photoState !== "kept" && (
                 <View style={styles.previewActions}>
                   <TouchableOpacity onPress={retakePhoto} style={[styles.previewBtn, { backgroundColor: "rgba(0,0,0,0.75)" }]}>
-                    <Text style={styles.previewBtnText}>🔄 Retake</Text>
+                    <Text style={styles.previewBtnText}>?? Retake</Text>
                   </TouchableOpacity>
                   <TouchableOpacity onPress={keepPhoto} style={[styles.previewBtn, { backgroundColor: "#22c55e" }]}>
-                    <Text style={styles.previewBtnText}>✓ Keep</Text>
+                    <Text style={styles.previewBtnText}>? Keep</Text>
                   </TouchableOpacity>
                 </View>
               )}
               {photoState === "kept" && (
                 <TouchableOpacity onPress={retakePhoto} style={[styles.camActionBtn, { right: 8, bottom: 8, backgroundColor: "rgba(0,0,0,0.6)" }]}>
-                  <Text style={styles.camActionText}>🔄 Change</Text>
+                  <Text style={styles.camActionText}>?? Change</Text>
                 </TouchableOpacity>
               )}
             </>
-          ) : (
+          )}
+
+          {/* VIDEO: preview / kept */}
+          {camMode === "video" && (videoState === "preview" || videoState === "kept") && (
             <>
-              {permission?.granted
-                ? <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" />
-                : <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
-                    <Text style={{ color: T.muted, fontFamily: "monospace", fontSize: 11 }}>Camera permission needed</Text>
-                  </View>
-              }
-              <TouchableOpacity onPress={takePhoto}
-                style={[styles.camActionBtn, { bottom: 10, right: 10, backgroundColor: "rgba(0,0,0,0.7)" }]}>
-                <Text style={styles.camActionText}>📷 Capture</Text>
-              </TouchableOpacity>
+              <Video source={{ uri: videoUri! }} style={StyleSheet.absoluteFill}
+                useNativeControls resizeMode={ResizeMode.COVER} shouldPlay={false} />
+              {videoState === "kept" && (
+                <View style={styles.keptBadge}><Text style={styles.keptText}>? Kept</Text></View>
+              )}
+              {videoState !== "kept" && (
+                <View style={styles.previewActions}>
+                  <TouchableOpacity onPress={redoVideo} style={[styles.previewBtn, { backgroundColor: "rgba(0,0,0,0.75)" }]}>
+                    <Text style={styles.previewBtnText}>?? Redo</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={keepVideo} style={[styles.previewBtn, { backgroundColor: "#22c55e" }]}>
+                    <Text style={styles.previewBtnText}>? Keep</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+              {videoState === "kept" && (
+                <TouchableOpacity onPress={redoVideo} style={[styles.camActionBtn, { right: 8, bottom: 8, backgroundColor: "rgba(0,0,0,0.6)" }]}>
+                  <Text style={styles.camActionText}>?? Change</Text>
+                </TouchableOpacity>
+              )}
+            </>
+          )}
+
+          {/* LIVE CAMERA */}
+          {showLiveCamera && (
+            permission?.granted
+              ? <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" />
+              : <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+                  <Text style={{ color: T.muted, fontFamily: "monospace", fontSize: 11 }}>Camera permission needed</Text>
+                </View>
+          )}
+
+          {/* Mode toggle (only when no media kept) */}
+          {showLiveCamera && videoState !== "recording" && (
+            <View style={styles.modeToggle}>
+              {(["photo", "video"] as const).map(m => (
+                <TouchableOpacity key={m} onPress={() => setCamMode(m)}
+                  style={{ paddingHorizontal: 14, paddingVertical: 4, borderRadius: 14,
+                    backgroundColor: camMode === m ? T.teal : "transparent" }}>
+                  <Text style={{ fontSize: 13, color: camMode === m ? "#fff" : "#9ca3af" }}>
+                    {m === "photo" ? "??" : "??"}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          )}
+
+          {/* Photo: capture button */}
+          {showLiveCamera && camMode === "photo" && (
+            <TouchableOpacity onPress={takePhoto}
+              style={[styles.camActionBtn, { bottom: 10, right: 10, backgroundColor: "rgba(0,0,0,0.7)" }]}>
+              <Text style={styles.camActionText}>?? Capture</Text>
+            </TouchableOpacity>
+          )}
+
+          {/* Video: idle ? Record */}
+          {camMode === "video" && videoState === "idle" && (
+            <TouchableOpacity onPress={startVideoRec}
+              style={[styles.camActionBtn, { bottom: 10, right: 10, backgroundColor: "rgba(0,0,0,0.7)" }]}>
+              <Text style={styles.camActionText}>?? Record</Text>
+            </TouchableOpacity>
+          )}
+
+          {/* Video: recording ? timer + Pause + Stop */}
+          {camMode === "video" && videoState === "recording" && (
+            <>
+              <View style={styles.recIndicator}>
+                <View style={styles.recDot} />
+                <Text style={styles.recTimer}>REC  {fmt(videoSecs)}</Text>
+              </View>
+              <View style={[styles.previewActions, { bottom: 10 }]}>
+                <TouchableOpacity onPress={pauseVideoRec}
+                  style={[styles.previewBtn, { backgroundColor: "rgba(0,0,0,0.75)" }]}>
+                  <Text style={styles.previewBtnText}>? Pause</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={stopVideoRec}
+                  style={[styles.previewBtn, { backgroundColor: "#ef4444" }]}>
+                  <Text style={styles.previewBtnText}>? Stop</Text>
+                </TouchableOpacity>
+              </View>
+            </>
+          )}
+
+          {/* Video: paused ? timer frozen + Resume + Stop */}
+          {camMode === "video" && videoState === "paused" && (
+            <>
+              <View style={styles.recIndicator}>
+                <Text style={[styles.recTimer, { color: "#f97316" }]}>? PAUSED  {fmt(videoSecs)}</Text>
+              </View>
+              <View style={[styles.previewActions, { bottom: 10 }]}>
+                <TouchableOpacity onPress={resumeVideoRec}
+                  style={[styles.previewBtn, { backgroundColor: T.teal }]}>
+                  <Text style={styles.previewBtnText}>? Resume</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={redoVideo}
+                  style={[styles.previewBtn, { backgroundColor: "rgba(0,0,0,0.75)" }]}>
+                  <Text style={styles.previewBtnText}>? Discard</Text>
+                </TouchableOpacity>
+              </View>
             </>
           )}
         </View>
 
         {/* GPS */}
         <Text style={{ fontSize: 10, fontFamily: "monospace", color: T.muted, marginTop: 8, marginBottom: 6 }}>
-          📍 {gps.lat.toFixed(5)}, {gps.lng.toFixed(5)}
+          ?? {gps.lat.toFixed(5)}, {gps.lng.toFixed(5)}
         </Text>
+
+        {flowError && !prediction && (
+          <View style={[styles.hitlErrorBanner, { borderColor: "#ef4444" }]}>
+            <Text style={styles.hitlErrorText}>{flowError}</Text>
+            <TouchableOpacity onPress={resetToScannerView} style={{ marginTop: 8 }}>
+              <Text style={{ color: T.teal, fontFamily: "monospace", fontSize: 11, fontWeight: "700" }}>
+                Re-snap hazard
+              </Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
         {/* Description + Speak */}
         <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
           <Text style={{ fontSize: 10, fontFamily: "monospace", color: T.muted }}>
-            {transcribing ? "TRANSCRIBING…" : "DESCRIPTION"}
+            {transcribing ? "TRANSCRIBING?" : "DESCRIPTION"}
           </Text>
           <TouchableOpacity onPress={micActive ? stopMic : startMic}
             style={{ flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 10,
@@ -529,13 +849,17 @@ function ReportIncidentSheet({ theme, gps, onSubmit, onCancel }: {
               borderColor: micActive ? "#ef4444" : T.border }}>
             {micActive && <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: "#ef4444" }} />}
             <Text style={{ fontSize: 11, fontFamily: "monospace", color: micActive ? "#ef4444" : T.muted }}>
-              {micActive ? `${fmt(micSecs)}  Stop` : "🎤 Speak"}
+              {micActive ? `${fmt(micSecs)}  Stop` : "?? Speak"}
             </Text>
           </TouchableOpacity>
         </View>
         <TextInput
-          style={[styles.textInputBox, { backgroundColor: T.bgPanel, borderColor: micActive ? T.teal : T.border, color: T.text }]}
-          placeholder={micActive ? "Listening… speak now" : "Describe what you see — flooding, pothole, fire…"}
+          style={[styles.textInputBox, {
+            backgroundColor: T.bgPanel,
+            borderColor: micActive ? T.teal : T.border,
+            color: T.text,
+          }]}
+          placeholder={micActive ? "Listening? speak now" : "Describe what you see ? flooding, pothole, fire?"}
           placeholderTextColor={T.muted}
           multiline numberOfLines={3}
           value={text} onChangeText={setText}
@@ -543,13 +867,41 @@ function ReportIncidentSheet({ theme, gps, onSubmit, onCancel }: {
 
         {/* Submit / Cancel */}
         <View style={styles.reportSheetBtns}>
-          <TouchableOpacity style={[styles.cancelBtn, { borderColor: T.border }]} onPress={onCancel}>
+          <TouchableOpacity style={[styles.cancelBtn, { borderColor: T.border }]} onPress={handleCancel}>
             <Text style={[styles.cancelBtnText, { color: T.muted }]}>Cancel</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.submitBtn} onPress={handleSubmit}>
-            <Text style={styles.submitBtnText}>Submit Report</Text>
-          </TouchableOpacity>
+          {!prediction && !predicting && (
+            <TouchableOpacity
+              style={[styles.submitBtn, { backgroundColor: T.bgPanel, borderWidth: 1, borderColor: T.border }]}
+              onPress={async () => {
+                if (micActive) await stopMic();
+                if (!frameB64Ref.current) {
+                  try {
+                    const p = await cameraRef.current?.takePictureAsync({ base64: true, quality: 0.6 });
+                    if (p?.base64) {
+                      frameB64Ref.current = p.base64;
+                      await runPredict(p.base64);
+                    }
+                  } catch {}
+                }
+              }}
+            >
+              <Text style={[styles.submitBtnText, { color: T.muted }]}>Capture for analysis</Text>
+            </TouchableOpacity>
+          )}
         </View>
+
+        <PredictionConfirmationCard
+          visible={!!prediction}
+          prediction={prediction}
+          theme={T}
+          phase={cardPhase}
+          errorMessage={flowError}
+          onConfirm={() => runFinalize(true)}
+          onStartCorrect={() => setCardPhase("correct")}
+          onSubmitCorrection={(correction) => runFinalize(false, correction)}
+          onDismissError={resetToScannerView}
+        />
       </View>
     </KeyboardAvoidingView>
   );
@@ -611,7 +963,7 @@ const styles = StyleSheet.create({
   reportFromZoneBtnText: { color: "#fff", fontFamily: "monospace", fontWeight: "700", fontSize: 13 },
 
   // Report sheet
-  reportSheet:        { borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 1, padding: 20, paddingBottom: 40 },
+  reportSheet:        { borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 1, padding: 20, paddingBottom: 40, position: "relative" },
   reportSheetTitle:   { fontFamily: "monospace", fontWeight: "700", fontSize: 15, marginBottom: 8 },
   cameraMiniPreview:  { height: 140, borderRadius: 10, marginBottom: 10, overflow: "hidden" },
   textInputBox:       { borderWidth: 1, borderRadius: 10, padding: 14, minHeight: 80, marginBottom: 12 },
@@ -625,7 +977,7 @@ const styles = StyleSheet.create({
   wardBanner2:        { borderWidth: 1, borderRadius: 8, padding: 10, marginTop: 8 },
   confirmedBadge2:    { borderWidth: 1, borderRadius: 4, paddingHorizontal: 6, paddingVertical: 2 },
 
-  // Report sheet — media controls
+  // Report sheet ? media controls
   squareMedia:     { width: "100%", aspectRatio: 1, borderRadius: 12, borderWidth: 1, overflow: "hidden", backgroundColor: "#000", marginBottom: 2 },
   previewActions:  { position: "absolute", bottom: 10, flexDirection: "row", gap: 8, alignSelf: "center", left: "50%", marginLeft: -74 },
   previewBtn:      { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 18 },
@@ -638,4 +990,8 @@ const styles = StyleSheet.create({
   recIndicator:    { position: "absolute", top: 10, left: 10, flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: "rgba(0,0,0,0.65)", paddingHorizontal: 10, paddingVertical: 4, borderRadius: 10 },
   recDot:          { width: 8, height: 8, borderRadius: 4, backgroundColor: "#ef4444" },
   recTimer:        { color: "#fff", fontSize: 11, fontFamily: "monospace", fontWeight: "600" },
+  predictOverlay:  { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(5,15,20,0.82)", alignItems: "center", justifyContent: "center", gap: 10, zIndex: 5 },
+  predictOverlayText: { fontFamily: "monospace", fontSize: 10, letterSpacing: 2, fontWeight: "700" },
+  hitlErrorBanner: { borderWidth: 1, borderRadius: 8, padding: 10, marginBottom: 8, backgroundColor: "#ef444411" },
+  hitlErrorText:   { color: "#fca5a5", fontFamily: "monospace", fontSize: 11 },
 });

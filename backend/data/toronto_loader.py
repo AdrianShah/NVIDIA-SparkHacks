@@ -41,6 +41,7 @@ TARGET_CRS = "EPSG:2958"  # NAD83 / UTM Zone 17N
 _hydrants_gdf: gpd.GeoDataFrame | None = None
 _buildings_gdf: gpd.GeoDataFrame | None = None
 _streets_gdf: gpd.GeoDataFrame | None = None
+_neighbourhoods_gdf: gpd.GeoDataFrame | None = None
 _requests_df: pd.DataFrame | None = None
 
 _to_utm = Transformer.from_crs("EPSG:4326", TARGET_CRS, always_xy=True)
@@ -103,7 +104,7 @@ def _df_with_coords_to_gdf(df: pd.DataFrame) -> gpd.GeoDataFrame:
 
 
 def load_all() -> None:
-    global _hydrants_gdf, _buildings_gdf, _streets_gdf, _requests_df
+    global _hydrants_gdf, _buildings_gdf, _streets_gdf, _neighbourhoods_gdf, _requests_df
 
     # ── Fire Hydrants ─────────────────────────────────────────────────────────
     hydrants_path = DATA_DIR / "fire-hydrants.geojson"
@@ -156,6 +157,42 @@ def load_all() -> None:
         except Exception as exc:
             logger.warning("Could not load 311 CSV: %s", exc)
             _requests_df = None
+
+    # ── City of Toronto Neighbourhood boundaries (risk-zone polygons) ─────────
+    neighbourhoods_path = DATA_DIR / "toronto-neighbourhoods.geojson"
+    if neighbourhoods_path.exists():
+        try:
+            _neighbourhoods_gdf = _read_geodataframe(neighbourhoods_path)
+            if len(_neighbourhoods_gdf) > 0:
+                _ = _neighbourhoods_gdf.sindex
+            logger.info("Loaded %d Toronto neighbourhoods", len(_neighbourhoods_gdf))
+        except Exception as exc:
+            logger.warning("Could not load neighbourhoods GeoJSON: %s", exc)
+            _neighbourhoods_gdf = _empty_gdf()
+    else:
+        logger.info("toronto-neighbourhoods.geojson not found — ward-level risk fallback")
+        _neighbourhoods_gdf = _empty_gdf()
+
+
+def neighbourhood_at_point(lat: float, lng: float) -> dict | None:
+    """Return neighbourhood metadata for a WGS84 point, or None if boundaries are unloaded."""
+    if _neighbourhoods_gdf is None or len(_neighbourhoods_gdf) == 0:
+        return None
+    point = _point_utm(lat, lng)
+    hits = _neighbourhoods_gdf[_neighbourhoods_gdf.geometry.contains(point)]
+    if hits.empty:
+        hits = _neighbourhoods_gdf[
+            _neighbourhoods_gdf.geometry.distance(point)
+            == _neighbourhoods_gdf.geometry.distance(point).min()
+        ]
+    if hits.empty:
+        return None
+    row = hits.iloc[0]
+    return {
+        "zone_id": str(_row_val(row, "AREA_SHORT_CODE", "AREA_LONG_CODE", default="")),
+        "zone_name": str(_row_val(row, "AREA_NAME", default="Unknown neighbourhood")),
+        "area_id": str(_row_val(row, "AREA_ID", default="")),
+    }
 
 
 def _gpu_nearest_hydrants(lat: float, lng: float, n: int) -> list[int] | None:
@@ -363,3 +400,25 @@ def get_311_history(
             ),
         })
     return results
+
+
+def get_prior_311_calls(lat: float, lng: float, radius_m: float = 200) -> int:
+    """Historic flood-related 311 count for the neighbourhood at this location."""
+    del radius_m  # 311 export has no coordinates; neighbourhood attribution uses ward + buildings
+    from backend.data.delation_risk import prior_311_for_point
+
+    return prior_311_for_point(lat, lng)
+
+
+def check_flood_zone(lat: float, lng: float) -> bool:
+    """True when the trained flood-susceptibility layer or historic signals flag elevated flood risk."""
+    from backend.data.delation_risk import flood_exposure_at_point
+
+    return flood_exposure_at_point(lat, lng)
+
+
+def get_ward_risk_score(lat: float, lng: float) -> float:
+    """Predictive baseline score (0–100) from Toronto historic open data at this location."""
+    from backend.data.delation_risk import get_ward_risk
+
+    return float(get_ward_risk(lat, lng).get("score", 0) or 0)

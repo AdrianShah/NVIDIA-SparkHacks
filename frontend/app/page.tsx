@@ -8,6 +8,8 @@ import IncidentFeed      from "@/components/IncidentFeed";
 import ReportModal       from "@/components/ReportModal";
 import ZoneDetailPanel   from "@/components/ZoneDetailPanel";
 import type { WardFeature, IncidentMarker, BuildingFeature } from "@/components/MapView";
+import { mapSharedIncidents, type SharedIncident } from "@/lib/incident-sync";
+import { normalizeWards } from "@/lib/wards";
 
 const MapView = dynamic(() => import("@/components/MapView"), {
   ssr:     false,
@@ -88,17 +90,48 @@ export default function Dashboard() {
     return () => { if (watchIdRef.current !== null) navigator.geolocation.clearWatch(watchIdRef.current); };
   }, []);
 
-  // ── Load ward risk map ───────────────────────────────────────────────────────
+  // ── Sync incidents from backend (web + mobile share same feed) ───────────────
   useEffect(() => {
+    let cancelled = false;
+    const sync = () => {
+      fetch(`${API}/api/incidents`)
+        .then((r) => r.json())
+        .then((d) => {
+          if (cancelled) return;
+          const { markers, feed, confirmed } = mapSharedIncidents(
+            (d.incidents ?? []) as SharedIncident[]
+          );
+          setIncidents(markers);
+          setAllIncidents(feed);
+          setConfirmed(confirmed);
+        })
+        .catch(() => {});
+    };
+    sync();
+    const interval = setInterval(sync, 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
+  // ── Load ward risk map (live backend only) ─────────────────────────────────
+  const refreshRiskMap = useCallback(() => {
     fetch(`${API}/api/risk-map`)
       .then((r) => r.json())
-      .then((d) => { if (d.wards?.length) setWardScores(d.wards); })
-      .catch(() => {});
+      .then((d) => setWardScores(normalizeWards(d.wards ?? [])))
+      .catch(() => setWardScores([]));
     fetch(`${API}/api/buildings`)
       .then((r) => r.json())
       .then((d) => { if (d.buildings?.length) setBuildings(d.buildings); })
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    refreshRiskMap();
+    const interval = setInterval(refreshRiskMap, 30000);
+    return () => clearInterval(interval);
+  }, [refreshRiskMap]);
 
   // ── WebSocket ────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -136,14 +169,21 @@ export default function Dashboard() {
     setIsProcessing(false);
 
     if (data.legitimate !== false) {
-      const newInc: IncidentMarker = { id: Date.now(), gps, urgency: data.urgency ?? "HIGH", transcript, timestamp: new Date().toISOString() };
-      setIncidents((p) => [...p, newInc]);
-      setAllIncidents((p) => [{ ...newInc, ward_risk: data.ward_risk ?? 0, escalated: data.escalated ?? false }, ...p]);
-      if (data.escalated) setConfirmed((c) => c + 1);
-      fetch(`${API}/api/risk-map`).then((r) => r.json()).then((d) => { if (d.wards?.length) setWardScores(d.wards); });
+      fetch(`${API}/api/incidents`)
+        .then((r) => r.json())
+        .then((d) => {
+          const { markers, feed, confirmed } = mapSharedIncidents(
+            (d.incidents ?? []) as SharedIncident[]
+          );
+          setIncidents(markers);
+          setAllIncidents(feed);
+          setConfirmed(confirmed);
+        })
+        .catch(() => {});
+      refreshRiskMap();
     }
     return { legitimate: data.legitimate !== false, urgency: data.urgency ?? "HIGH" };
-  }, []);
+  }, [refreshRiskMap]);
 
   // ── Shared panel content ─────────────────────────────────────────────────────
   const PanelContent = (

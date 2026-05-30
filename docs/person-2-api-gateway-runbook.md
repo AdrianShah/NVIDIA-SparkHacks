@@ -22,6 +22,7 @@ Expected handoff URLs:
 
 - Health: `http://localhost:8080/api/health`
 - Incident: `http://localhost:8080/api/incident`
+- Shared feed: `GET http://localhost:8080/api/incidents` (web + mobile poll every 4s)
 - Predictive ward risk map: `http://localhost:8080/api/risk-map`
 - Environmental risk: `http://localhost:8080/api/environmental-risk?lat=43.6532&lng=-79.3832`
 - Telemetry: `ws://localhost:8080/ws/stream`

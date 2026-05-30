@@ -1,10 +1,27 @@
-"""Deterministic Delation ward and incident risk scoring for the API gateway."""
+"""Predictive risk zones from City of Toronto historic open data used by Delation agents.
+
+Signals (all loaded locally at gateway startup):
+  - Historic 311 service requests (flood / drainage / sewer / basement)
+  - RentSafeTO apartment building evaluations (building vulnerability)
+  - Official neighbourhood boundaries (map zones)
+  - Flood susceptibility raster (model layer shipped with the repo)
+"""
+from __future__ import annotations
+
+import logging
 import math
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
+import geopandas as gpd
+import numpy as np
 import pandas as pd
+from shapely.geometry import mapping
 
 from backend.data import toronto_loader
+
+logger = logging.getLogger(__name__)
 
 _CONSTRUCTION_PATTERN = r"construction|demolition|excavat|build permit|hoarding|scaffold"
 
@@ -15,6 +32,18 @@ _RISK_LEVELS = (
     (25, "ELEVATED"),
     (0, "LOW"),
 )
+_FLOOD_SUSCEPTIBILITY_PATHS = (
+    Path(toronto_loader.DATA_DIR) / "flood-susceptibility-toronto.tif",
+    Path(toronto_loader.DATA_DIR) / "flood-susceptibility-toronto.geojson",
+)
+_FLOOD_ZONE_THRESHOLD = 60.0
+
+TORONTO_DATA_SOURCES = [
+    "City of Toronto 311 Service Requests (historic, customer-initiated)",
+    "RentSafeTO Apartment Building Evaluations",
+    "City of Toronto Neighbourhood boundaries",
+    "Flood susceptibility model raster (Toronto)",
+]
 
 
 def _level(score: float) -> str:
@@ -27,10 +56,6 @@ def _number(value: Any, default: float = 0) -> float:
         return default if math.isnan(number) else number
     except (TypeError, ValueError):
         return default
-
-
-def _ward_name(ward_id: int | None) -> str:
-    return f"Ward {ward_id}" if ward_id is not None else "Toronto"
 
 
 def _flood_311_count(ward_id: int | None) -> int:
@@ -52,21 +77,6 @@ def _ward_buildings(ward_id: int | None) -> pd.DataFrame:
     return buildings[ward_values == ward_id]
 
 
-def _ward_centroid(ward_id: int) -> tuple[float, float]:
-    """Compute centroid of a ward from mean building coordinates."""
-    buildings = toronto_loader._buildings_gdf
-    if buildings is None or buildings.empty:
-        return 43.6532, -79.3832
-    ward_rows = buildings[pd.to_numeric(buildings.get("WARD", pd.Series()), errors="coerce") == ward_id]
-    if ward_rows.empty:
-        return 43.6532, -79.3832
-    lats = pd.to_numeric(ward_rows.get("LATITUDE", pd.Series()), errors="coerce").dropna()
-    lngs = pd.to_numeric(ward_rows.get("LONGITUDE", pd.Series()), errors="coerce").dropna()
-    if lats.empty or lngs.empty:
-        return 43.6532, -79.3832
-    return float(lats.mean()), float(lngs.mean())
-
-
 def _active_construction(ward_id: int | None) -> bool:
     """True if there are 311 construction complaints in this ward."""
     df = toronto_loader._requests_df
@@ -81,81 +91,365 @@ def _active_construction(ward_id: int | None) -> bool:
     )
 
 
+def _ward_name(ward_id: int | None) -> str:
+    return f"Ward {ward_id}" if ward_id is not None else "Toronto"
+
+
+def _geometry_centroid_wgs84(geom) -> dict[str, float]:
+    try:
+        gdf = gpd.GeoDataFrame(geometry=[geom], crs=toronto_loader.TARGET_CRS)
+        point = gdf.to_crs("EPSG:4326").geometry.iloc[0].centroid
+        return {"lat": round(float(point.y), 6), "lng": round(float(point.x), 6)}
+    except Exception:
+        return {"lat": 43.6532, "lng": -79.3832}
+
+
+@lru_cache(maxsize=1)
+def _flood_raster_dataset():
+    tif_path = _FLOOD_SUSCEPTIBILITY_PATHS[0]
+    if not tif_path.exists():
+        return None
+    try:
+        import rasterio
+    except ImportError:
+        logger.warning("rasterio not installed ??? flood susceptibility raster disabled")
+        return None
+    try:
+        return rasterio.open(tif_path)
+    except Exception as exc:
+        logger.warning("Could not open flood susceptibility raster: %s", exc)
+        return None
+
+
+def _sample_flood_susceptibility(lat: float, lng: float) -> float:
+    dataset = _flood_raster_dataset()
+    if dataset is None:
+        return 0.0
+    try:
+        for value in dataset.sample([(lng, lat)]):
+            sampled = float(value[0])
+            if math.isfinite(sampled) and sampled > 0:
+                return sampled
+    except Exception as exc:
+        logger.debug("Flood susceptibility sample failed: %s", exc)
+    return 0.0
+
+
+def _zonal_flood_susceptibility(geometry) -> float:
+    dataset = _flood_raster_dataset()
+    if dataset is None:
+        return 0.0
+    try:
+        import rasterio
+        from rasterio.mask import mask
+
+        geom_wgs84 = gpd.GeoDataFrame(geometry=[geometry], crs=toronto_loader.TARGET_CRS).to_crs(
+            dataset.crs
+        )
+        clipped, _ = mask(dataset, [mapping(geom_wgs84.geometry.iloc[0])], crop=True, filled=False)
+        values = clipped.compressed() if hasattr(clipped, "compressed") else clipped[~np.isnan(clipped)]
+        if values.size == 0:
+            centroid = _geometry_centroid_wgs84(geometry)
+            return _sample_flood_susceptibility(centroid["lat"], centroid["lng"])
+        return float(np.nanmean(values))
+    except Exception as exc:
+        logger.debug("Zonal flood susceptibility failed: %s", exc)
+        centroid = _geometry_centroid_wgs84(geometry)
+        return _sample_flood_susceptibility(centroid["lat"], centroid["lng"])
+
+
+def _buildings_in_neighbourhoods() -> gpd.GeoDataFrame:
+    buildings = toronto_loader._buildings_gdf
+    neighbourhoods = toronto_loader._neighbourhoods_gdf
+    if buildings is None or buildings.empty or neighbourhoods is None or neighbourhoods.empty:
+        return gpd.GeoDataFrame()
+
+    try:
+        joined = gpd.sjoin(
+            buildings,
+            neighbourhoods[
+                ["AREA_SHORT_CODE", "AREA_NAME", "AREA_ID", "geometry"]
+            ],
+            how="inner",
+            predicate="within",
+        )
+        return joined
+    except Exception as exc:
+        logger.warning("Building ??? neighbourhood spatial join failed: %s", exc)
+        return gpd.GeoDataFrame()
+
+
+def _ward_building_counts() -> dict[int, int]:
+    buildings = toronto_loader._buildings_gdf
+    if buildings is None or buildings.empty or "WARD" not in buildings.columns:
+        return {}
+    ward_values = pd.to_numeric(buildings["WARD"], errors="coerce")
+    counts = buildings.groupby(ward_values).size()
+    return {int(ward): int(count) for ward, count in counts.items() if pd.notna(ward)}
+
+
+@lru_cache(maxsize=1)
+def _zone_index() -> list[dict[str, Any]]:
+    """Precompute neighbourhood risk zones from historic Toronto datasets."""
+    neighbourhoods = toronto_loader._neighbourhoods_gdf
+    if neighbourhoods is None or neighbourhoods.empty:
+        return []
+
+    joined = _buildings_in_neighbourhoods()
+    ward_totals = _ward_building_counts()
+    zones: list[dict[str, Any]] = []
+
+    for _, row in neighbourhoods.iterrows():
+        zone_id = str(toronto_loader._row_val(row, "AREA_SHORT_CODE", "AREA_LONG_CODE", default=""))
+        zone_name = str(toronto_loader._row_val(row, "AREA_NAME", default="Unknown neighbourhood"))
+        geometry = row.geometry
+
+        nbhd_buildings = (
+            joined[joined["AREA_SHORT_CODE"] == row["AREA_SHORT_CODE"]]
+            if not joined.empty and "AREA_SHORT_CODE" in joined.columns
+            else pd.DataFrame()
+        )
+
+        scores = (
+            pd.to_numeric(nbhd_buildings.get("CURRENT BUILDING EVAL SCORE"), errors="coerce")
+            if not nbhd_buildings.empty and "CURRENT BUILDING EVAL SCORE" in nbhd_buildings.columns
+            else pd.Series(dtype=float)
+        )
+        vulnerable_buildings = int((scores < 70).sum())
+
+        ward_id = None
+        if not nbhd_buildings.empty and "WARD" in nbhd_buildings.columns:
+            ward_values = pd.to_numeric(nbhd_buildings["WARD"], errors="coerce").dropna()
+            if not ward_values.empty:
+                ward_id = int(ward_values.mode().iloc[0])
+        if ward_id is None:
+            centroid = _geometry_centroid_wgs84(geometry)
+            ward_id = toronto_loader._ward_from_point(centroid["lat"], centroid["lng"])
+
+        ward_flood_311 = _flood_311_count(ward_id)
+        ward_total = ward_totals.get(ward_id, 0) if ward_id is not None else 0
+        nbhd_building_count = len(nbhd_buildings)
+        if ward_total > 0 and nbhd_building_count > 0:
+            flood_311 = int(round(ward_flood_311 * (nbhd_building_count / ward_total)))
+        else:
+            flood_311 = ward_flood_311 if nbhd_building_count > 0 else 0
+
+        susceptibility = round(_zonal_flood_susceptibility(geometry), 1)
+        score = min(
+            100.0,
+            flood_311 * 2.0
+            + vulnerable_buildings * 1.5
+            + susceptibility * 0.35
+            + (20.0 if susceptibility >= _FLOOD_ZONE_THRESHOLD else 0.0),
+        )
+
+        signals = []
+        if flood_311:
+            signals.append(
+                f"{flood_311} historic flood, drainage, or sewer-related 311 requests (ward-proportional)"
+            )
+        if vulnerable_buildings:
+            signals.append(
+                f"{vulnerable_buildings} RentSafeTO buildings with evaluation score below 70"
+            )
+        if susceptibility >= _FLOOD_ZONE_THRESHOLD:
+            signals.append(f"Flood susceptibility model mean {susceptibility:g}/100 in neighbourhood")
+        elif susceptibility > 0:
+            signals.append(f"Flood susceptibility model mean {susceptibility:g}/100")
+        if not signals:
+            signals.append("No elevated historic signals in loaded Toronto datasets for this zone")
+
+        centroid = _geometry_centroid_wgs84(geometry)
+        level = _level(score)
+        zones.append(
+            {
+                "id": zone_id,
+                "name": zone_name,
+                "score": round(score, 1),
+                "risk_level": level,
+                "lat": centroid["lat"],
+                "lng": centroid["lng"],
+                "in_flood_zone": bool(susceptibility >= _FLOOD_ZONE_THRESHOLD or flood_311 > 0),
+                "prior_311": flood_311,
+                "flood_susceptibility": susceptibility,
+                "vulnerable_buildings": vulnerable_buildings,
+                "watermain_age": None,
+                "ward_id": str(ward_id) if ward_id is not None else zone_id,
+                "ward_name": zone_name,
+                "level": level,
+                "signals": signals,
+                "zone_type": "toronto_neighbourhood",
+                "data_scope": "Neighbourhood zones from historic 311, RentSafeTO, and flood susceptibility layers",
+            }
+        )
+
+    return sorted(zones, key=lambda item: item["score"], reverse=True)
+
+
+def _zone_by_id(zone_id: str) -> dict[str, Any] | None:
+    for zone in _zone_index():
+        if zone["id"] == zone_id:
+            return zone
+    return None
+
+
+def _zone_at_point(lat: float, lng: float) -> dict[str, Any] | None:
+    meta = toronto_loader.neighbourhood_at_point(lat, lng)
+    if meta and meta.get("zone_id"):
+        zone = _zone_by_id(str(meta["zone_id"]))
+        if zone:
+            return zone
+    return None
+
+
+def _ward_centroid(ward_id: int | None) -> dict[str, float]:
+    buildings = _ward_buildings(ward_id)
+    if buildings.empty or "geometry" not in buildings.columns:
+        return {"lat": 43.6532, "lng": -79.3832}
+    try:
+        centroid = buildings.geometry.unary_union.centroid
+        return _geometry_centroid_wgs84(centroid)
+    except Exception:
+        return {"lat": 43.6532, "lng": -79.3832}
+
+
 def _ward_record(ward_id: int | None, floodplain: bool = False) -> dict[str, Any]:
+    """Ward-level fallback when neighbourhood boundaries are not loaded."""
     buildings = _ward_buildings(ward_id)
     scores = (
         pd.to_numeric(buildings.get("CURRENT BUILDING EVAL SCORE"), errors="coerce")
         if not buildings.empty and "CURRENT BUILDING EVAL SCORE" in buildings.columns
         else pd.Series(dtype=float)
     )
-    flood_311    = _flood_311_count(ward_id)
-    vuln_count   = int((scores < 70).sum())
+    flood_311 = _flood_311_count(ward_id)
+    vulnerable_buildings = int((scores < 70).sum())
     construction = _active_construction(ward_id)
-    score = min(100.0,
-        flood_311 * 3.0
-        + vuln_count * 1.5
+    centroid = _ward_centroid(ward_id)
+    susceptibility = _sample_flood_susceptibility(centroid["lat"], centroid["lng"])
+    score = min(
+        100.0,
+        flood_311 * 2.0
+        + vulnerable_buildings * 1.5
+        + susceptibility * 0.35
         + (25.0 if floodplain else 0.0)
-        + (8.0 if construction else 0.0)
+        + (20.0 if susceptibility >= _FLOOD_ZONE_THRESHOLD else 0.0)
+        + (8.0 if construction else 0.0),
     )
-    risk_level = _level(score)
-
     signals = []
     if floodplain:
-        signals.append("TRCA regulatory floodplain overlap")
+        signals.append("TRCA regulatory floodplain overlap (live incident check)")
     if flood_311:
-        signals.append(f"{flood_311} flood/drainage 311 requests")
-    if vuln_count:
-        signals.append(f"{vuln_count} buildings with RentSafeTO score < 70")
+        signals.append(f"{flood_311} historic flood, drainage, or sewer-related 311 requests")
+    if vulnerable_buildings:
+        signals.append(f"{vulnerable_buildings} RentSafeTO buildings with evaluation score below 70")
     if construction:
         signals.append("Active construction reported via 311")
+    if susceptibility >= _FLOOD_ZONE_THRESHOLD:
+        signals.append(f"Flood susceptibility model {susceptibility:g}/100 at ward centroid")
     if not signals:
-        signals.append("No elevated risk signals in loaded datasets")
+        signals.append("No elevated historic signals in loaded Toronto datasets")
 
-    # Ward name from buildings WARDNAME column
-    ward_name = _ward_name(ward_id)
-    if not buildings.empty and "WARDNAME" in buildings.columns:
-        name_val = buildings["WARDNAME"].dropna().iloc[0] if not buildings.empty else None
-        if name_val:
-            ward_name = str(name_val)
-
-    lat, lng = _ward_centroid(ward_id) if ward_id is not None else (43.6532, -79.3832)
-
+    level = _level(score)
+    ward_key = str(ward_id) if ward_id is not None else "unknown"
+    name = _ward_name(ward_id)
     return {
-        "id":           str(ward_id) if ward_id is not None else "unknown",
-        "name":         ward_name,
-        "score":        round(score, 1),
-        "risk_level":   risk_level,
-        "lat":          round(lat, 6),
-        "lng":          round(lng, 6),
-        "in_flood_zone": floodplain,
-        "prior_311":    flood_311,
-        "watermain_age": 0,
+        "id": ward_key,
+        "name": name,
+        "score": round(score, 1),
+        "risk_level": level,
+        "lat": centroid["lat"],
+        "lng": centroid["lng"],
+        "in_flood_zone": bool(floodplain or flood_311 > 0 or susceptibility >= _FLOOD_ZONE_THRESHOLD),
+        "prior_311": flood_311,
+        "flood_susceptibility": susceptibility,
+        "watermain_age": None,
         "construction": construction,
-        "signals":      signals,
+        "ward_id": ward_key,
+        "ward_name": name,
+        "level": level,
+        "signals": signals,
+        "zone_type": "city_ward_fallback",
+        "data_scope": "Ward fallback from historic 311 + RentSafeTO (neighbourhood polygons unavailable)",
     }
 
 
-def get_ward_risk(lat: float, lng: float, *, floodplain: bool = False) -> dict[str, Any]:
+def _zone_record_at_point(lat: float, lng: float, *, floodplain: bool = False) -> dict[str, Any]:
+    zone = _zone_at_point(lat, lng)
+    if zone:
+        record = dict(zone)
+        if floodplain:
+            record["score"] = round(min(100.0, float(record["score"]) + 25.0), 1)
+            record["risk_level"] = _level(record["score"])
+            record["level"] = record["risk_level"]
+            record["signals"] = list(record["signals"]) + [
+                "TRCA regulatory floodplain overlap (live incident check)"
+            ]
+            record["in_flood_zone"] = True
+        return record
+
     ward_id = toronto_loader._ward_from_point(lat, lng)
     return _ward_record(ward_id, floodplain)
 
 
+def prior_311_for_point(lat: float, lng: float) -> int:
+    zone = _zone_at_point(lat, lng)
+    if zone:
+        return int(zone.get("prior_311", 0))
+    ward_id = toronto_loader._ward_from_point(lat, lng)
+    return _flood_311_count(ward_id)
+
+
+def flood_exposure_at_point(lat: float, lng: float) -> bool:
+    zone = _zone_at_point(lat, lng)
+    if zone and zone.get("in_flood_zone"):
+        return True
+    susceptibility = _sample_flood_susceptibility(lat, lng)
+    if susceptibility >= _FLOOD_ZONE_THRESHOLD:
+        return True
+    ward_id = toronto_loader._ward_from_point(lat, lng)
+    return _flood_311_count(ward_id) > 0
+
+
+def get_ward_risk(lat: float, lng: float, *, floodplain: bool = False) -> dict[str, Any]:
+    """Predictive baseline for the Toronto neighbourhood (or ward fallback) at a point."""
+    return _zone_record_at_point(lat, lng, floodplain=floodplain)
+
+
 def get_risk_map() -> dict[str, Any]:
-    """Return ranked ward risks with coordinates from real building data."""
+    """Return ranked risk zones from historic City of Toronto open data."""
+    zones = _zone_index()
+    if zones:
+        return {
+            "wards": zones,
+            "zone_type": "toronto_neighbourhood",
+            "scoring_mode": "toronto-historic-open-data",
+            "data_sources": TORONTO_DATA_SOURCES,
+            "data_scope": (
+                "Neighbourhood polygons scored from historic 311 flood requests, "
+                "RentSafeTO building evaluations, and the local flood susceptibility raster."
+            ),
+        }
+
     ward_ids: set[int] = set()
     buildings = toronto_loader._buildings_gdf
-    requests  = toronto_loader._requests_df
+    requests = toronto_loader._requests_df
     if buildings is not None and not buildings.empty and "WARD" in buildings.columns:
         ward_ids.update(
-            int(v) for v in pd.to_numeric(buildings["WARD"], errors="coerce").dropna().unique()
+            int(value) for value in pd.to_numeric(buildings["WARD"], errors="coerce").dropna().unique()
         )
     if requests is not None and not requests.empty and "_ward_num" in requests.columns:
-        ward_ids.update(int(v) for v in requests["_ward_num"].dropna().unique())
-    wards = sorted(
-        (_ward_record(wid) for wid in ward_ids),
-        key=lambda w: w["score"], reverse=True
-    )
-    return {"wards": wards}
+        ward_ids.update(int(value) for value in requests["_ward_num"].dropna().unique())
+    wards = sorted((_ward_record(ward_id) for ward_id in ward_ids), key=lambda item: item["score"], reverse=True)
+    return {
+        "wards": wards,
+        "zone_type": "city_ward_fallback",
+        "scoring_mode": "toronto-historic-open-data",
+        "data_sources": TORONTO_DATA_SOURCES,
+        "data_scope": (
+            "Ward-level fallback using historic 311 and RentSafeTO until "
+            "toronto-neighbourhoods.geojson is present in DATA_DIR."
+        ),
+    }
 
 
 def get_at_risk_buildings() -> list[dict[str, Any]]:
@@ -166,8 +460,8 @@ def get_at_risk_buildings() -> list[dict[str, Any]]:
     result = []
     for _, row in buildings.iterrows():
         try:
-            lat  = float(row.get("LATITUDE")  or 0)
-            lng  = float(row.get("LONGITUDE") or 0)
+            lat = float(row.get("LATITUDE") or 0)
+            lng = float(row.get("LONGITUDE") or 0)
             if not lat or not lng:
                 continue
             score = float(row.get("CURRENT BUILDING EVAL SCORE") or 0)
@@ -175,11 +469,11 @@ def get_at_risk_buildings() -> list[dict[str, Any]]:
                 continue
             result.append({
                 "address": str(row.get("SITE ADDRESS", "Unknown")),
-                "score":   round(score, 1),
-                "ward":    str(row.get("WARD", "")),
-                "floors":  int(row.get("CONFIRMED STOREYS") or 0),
-                "lat":     round(lat, 6),
-                "lng":     round(lng, 6),
+                "score": round(score, 1),
+                "ward": str(row.get("WARD", "")),
+                "floors": int(row.get("CONFIRMED STOREYS") or 0),
+                "lat": round(lat, 6),
+                "lng": round(lng, 6),
             })
         except (TypeError, ValueError):
             continue
@@ -194,8 +488,9 @@ def score_incident(
     ward_risk: dict[str, Any],
 ) -> dict[str, Any]:
     """Combine grounded gateway signals into an explainable incident score."""
+    zone_name = ward_risk.get("ward_name") or ward_risk.get("name") or "this area"
     score = min(35.0, _number(ward_risk.get("score")) * 0.35)
-    factors = [f"Predicted {_level(_number(ward_risk.get('score'))).lower()} baseline risk for {ward_risk['ward_name']}"]
+    factors = [f"Predicted {_level(_number(ward_risk.get('score'))).lower()} baseline risk for {zone_name}"]
 
     flood_risk = environmental.get("flood_risk", {})
     if flood_risk.get("in_regulatory_floodplain"):
@@ -238,7 +533,7 @@ def score_incident(
         "factors": factors,
         "escalated": escalated,
         "escalation_reason": (
-            f"Citizen flooding report confirms predicted risk in {ward_risk['ward_name']}"
+            f"Citizen flooding report confirms predicted risk in {zone_name}"
             if escalated
             else ""
         ),

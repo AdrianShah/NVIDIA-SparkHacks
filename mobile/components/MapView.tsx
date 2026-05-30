@@ -38,7 +38,7 @@ interface MapViewProps {
   wardScores:   WardScore[];
   buildings?:   BuildingPoint[];
   spatial?:     SpatialData | null;
-  incidents?:   Array<{ lat: number; lng: number; urgency: string; transcript: string }>;
+  incidents?:   Array<{ id?: string; lat: number; lng: number; urgency: string; transcript: string }>;
   isDark:       boolean;
   isActive:     boolean;
   urgency?:     string;
@@ -77,7 +77,7 @@ export default function MapView({ gps, wardScores, buildings = [], spatial, inci
       <UrlTile urlTemplate={tileUrl} maximumZ={19} flipY={false} />
 
       {/* ── Ward risk zones ── */}
-      {wardScores.map((ward) => {
+      {wardScores.filter((w) => typeof w.lat === "number" && typeof w.lng === "number").map((ward) => {
         const color = RISK_COLOR[ward.risk_level];
         const radius = ward.risk_level === "CRITICAL" ? 800
                      : ward.risk_level === "HIGH"     ? 600
@@ -161,8 +161,8 @@ export default function MapView({ gps, wardScores, buildings = [], spatial, inci
       )}
 
       {/* ── Past incident markers ── */}
-      {incidents?.map((inc, i) => (
-        <Marker key={`inc-${i}`} coordinate={{ latitude: inc.lat, longitude: inc.lng }} anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={false}>
+      {incidents?.map((inc) => (
+        <Marker key={inc.id ?? `${inc.lat}-${inc.lng}`} coordinate={{ latitude: inc.lat, longitude: inc.lng }} anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={false}>
           <View style={[styles.incidentDot, { backgroundColor: RISK_COLOR[inc.urgency] ?? "#f97316" }]} />
         </Marker>
       ))}

@@ -29,7 +29,9 @@ export default function WardBriefingPanel({ wardScores, onWardClick }: Props) {
         Ward Risk Briefing
       </p>
       {top.length === 0 && (
-        <p className="text-xs italic" style={{ color: "var(--text-muted)" }}>Loading ward scores…</p>
+        <p className="text-xs italic" style={{ color: "var(--text-muted)" }}>
+          No ward data from backend. Check API connection.
+        </p>
       )}
       <div className="space-y-1">
         {top.map((w) => (

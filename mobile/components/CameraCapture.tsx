@@ -4,10 +4,11 @@ import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
 
 interface CameraCaptureProps {
   isActive: boolean;
+  paused?: boolean;
   onFrame: (base64: string) => void;
 }
 
-export default function CameraCapture({ isActive, onFrame }: CameraCaptureProps) {
+export default function CameraCapture({ isActive, paused = false, onFrame }: CameraCaptureProps) {
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef<CameraView>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -15,8 +16,9 @@ export default function CameraCapture({ isActive, onFrame }: CameraCaptureProps)
   useEffect(() => { onFrameRef.current = onFrame; }, [onFrame]);
 
   useEffect(() => {
-    if (!isActive) {
+    if (!isActive || paused) {
       if (intervalRef.current) clearInterval(intervalRef.current);
+      intervalRef.current = null;
       return;
     }
     if (!permission?.granted) return;
@@ -30,7 +32,7 @@ export default function CameraCapture({ isActive, onFrame }: CameraCaptureProps)
     }, 3000);
 
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
-  }, [isActive, permission?.granted]);
+  }, [isActive, paused, permission?.granted]);
 
   if (!permission) return <View style={styles.box} />;
 

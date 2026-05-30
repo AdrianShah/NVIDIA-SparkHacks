@@ -16,6 +16,7 @@ import math
 import os
 import struct
 import time
+import uuid
 import wave
 from contextlib import asynccontextmanager
 from enum import Enum
@@ -30,6 +31,7 @@ from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field, field_validator
 
 from backend.agents.civic_vox_graph import AgentState, civic_vox_engine
+from backend.incident_store import incident_store
 from backend.data.delation_risk import get_risk_map, get_ward_risk, score_incident
 from backend.data.environmental_risk import feed_cache_status, get_environmental_risk
 from backend.data import toronto_loader
@@ -93,6 +95,28 @@ class IncidentResponse(BaseModel):
     escalated: bool = False
     escalation_reason: str = ""
     performance: dict[str, Any] = Field(default_factory=dict)
+
+
+class PredictRequest(BaseModel):
+    frame_b64: str = Field(..., min_length=1)
+    gps: GpsPayload = Field(default_factory=GpsPayload)
+
+
+class PredictResponse(BaseModel):
+    prediction_id: str
+    hazard_type: str
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
+class FinalizeRequest(BaseModel):
+    prediction_id: str = Field(..., min_length=1)
+    confirmed: bool
+    gps: GpsPayload = Field(default_factory=GpsPayload)
+    user_correction: Optional[str] = None
+
+
+_PENDING_PREDICTIONS: dict[str, dict[str, Any]] = {}
+_PREDICTION_TTL_SECONDS = 600
 
 
 class SynthesizeRequest(BaseModel):
@@ -423,6 +447,61 @@ async def _enrich_response(
     })
 
 
+def _prune_stale_predictions() -> None:
+    cutoff = time.time() - _PREDICTION_TTL_SECONDS
+    stale = [pid for pid, row in _PENDING_PREDICTIONS.items() if row.get("created_at", 0) < cutoff]
+    for pid in stale:
+        _PENDING_PREDICTIONS.pop(pid, None)
+
+
+async def _run_incident_pipeline(req: IncidentRequest) -> IncidentResponse:
+    """Shared full pipeline used by /api/incident and /api/incident/finalize."""
+    started_at = time.perf_counter()
+    if MOCK_MODE:
+        enriched = await _enrich_response(req, _mock_incident_response(), started_at=started_at)
+        await _persist_incident(req, enriched)
+        return enriched
+
+    initial_state = _build_initial_state(req)
+    agent_started = time.perf_counter()
+    try:
+        result = await civic_vox_engine.ainvoke(initial_state)
+    except Exception as exc:
+        logger.exception("Agent engine failed")
+        raise HTTPException(status_code=503, detail="agent engine unavailable") from exc
+
+    enriched = await _enrich_response(
+        req,
+        _result_to_response(result),
+        started_at=started_at,
+        agent_latency_ms=(time.perf_counter() - agent_started) * 1000,
+    )
+    legitimate = result.get("is_legitimate", True)
+    if legitimate is not False:
+        await _persist_incident(req, enriched, legitimate=bool(legitimate))
+    return enriched
+
+
+async def _persist_incident(
+    req: IncidentRequest,
+    response: IncidentResponse,
+    *,
+    source: str = "api",
+    legitimate: bool = True,
+) -> None:
+    """Append to shared feed so web and mobile stay in sync."""
+    await incident_store.add(
+        transcript=req.transcript,
+        gps={"lat": req.gps.lat, "lng": req.gps.lng},
+        urgency=response.urgency,
+        escalated=response.escalated,
+        ward_risk=response.ward_risk,
+        report=response.report,
+        legitimate=legitimate,
+        source=source,
+    )
+
+
 async def _commit_audio_buffer(websocket: WebSocket, audio_buffer: bytearray, audio_format: str) -> str:
     audio_bytes = bytes(audio_buffer)
     audio_buffer.clear()
@@ -496,32 +575,75 @@ async def health():
     }
 
 
+@app.post("/api/incident/predict", response_model=PredictResponse)
+async def predict_incident(req: PredictRequest):
+    """Phase 1 — Maverick vision-only hazard classification for human confirmation."""
+    _prune_stale_predictions()
+    prediction_id = str(uuid.uuid4())
+    mock_vision = _mock_incident_response().vision
+    hazard_type = str(mock_vision.get("hazard_type", "Unknown"))
+    confidence = 0.87 if MOCK_MODE else 0.78
+    _PENDING_PREDICTIONS[prediction_id] = {
+        "frame_b64": req.frame_b64,
+        "gps": {"lat": req.gps.lat, "lng": req.gps.lng},
+        "hazard_type": hazard_type,
+        "confidence": confidence,
+        "created_at": time.time(),
+    }
+    return PredictResponse(
+        prediction_id=prediction_id,
+        hazard_type=hazard_type,
+        confidence=confidence,
+    )
+
+
+@app.post("/api/incident/finalize", response_model=IncidentResponse)
+async def finalize_incident(req: FinalizeRequest):
+    """Phase 2 — run full dispatch pipeline after reporter confirms or corrects."""
+    _prune_stale_predictions()
+    pending = _PENDING_PREDICTIONS.get(req.prediction_id)
+    if not pending:
+        raise HTTPException(status_code=404, detail="prediction not found or expired")
+
+    if req.confirmed:
+        hazard = pending.get("hazard_type", "Emergency")
+        transcript = f"{hazard} incident confirmed by reporter"
+    else:
+        correction = (req.user_correction or "").strip()
+        if not correction:
+            raise HTTPException(status_code=422, detail="user_correction required when not confirmed")
+        transcript = correction
+
+    _PENDING_PREDICTIONS.pop(req.prediction_id, None)
+
+    incident_req = IncidentRequest(
+        transcript=transcript,
+        frame_b64=pending.get("frame_b64"),
+        gps=req.gps,
+    )
+    return await _run_incident_pipeline(incident_req)
+
+
 @app.post("/api/incident", response_model=IncidentResponse)
 async def process_incident(req: IncidentRequest):
-    started_at = time.perf_counter()
-    if MOCK_MODE:
-        return await _enrich_response(req, _mock_incident_response(), started_at=started_at)
+    return await _run_incident_pipeline(req)
 
-    initial_state = _build_initial_state(req)
-    agent_started = time.perf_counter()
-    try:
-        result = await civic_vox_engine.ainvoke(initial_state)
-    except Exception as exc:
-        logger.exception("Agent engine failed")
-        raise HTTPException(status_code=503, detail="agent engine unavailable") from exc
 
-    return await _enrich_response(
-        req,
-        _result_to_response(result),
-        started_at=started_at,
-        agent_latency_ms=(time.perf_counter() - agent_started) * 1000,
-    )
+@app.get("/api/incidents")
+async def list_incidents(limit: int = Query(100, ge=1, le=200)):
+    """Shared incident feed for web dashboard and mobile map."""
+    return {"incidents": await incident_store.list_incidents(limit=limit)}
 
 
 @app.get("/api/risk-map")
 @app.post("/api/risk-map")
 async def risk_map():
-    return get_risk_map()
+    from backend.data.delation_risk import _ward_record
+
+    result = get_risk_map()
+    if MOCK_MODE and not result["wards"]:
+        result["wards"] = [_ward_record(14, floodplain=True)]
+    return result
 
 
 @app.get("/api/buildings")
@@ -681,6 +803,7 @@ async def websocket_stream(websocket: WebSocket):
                             escalated=True,
                         )
                     )
+                await _persist_incident(req, enriched, source="websocket")
                 continue
 
             initial_state = _build_initial_state(req)
@@ -735,6 +858,15 @@ async def websocket_stream(websocket: WebSocket):
                                 escalated=True,
                             )
                         )
+                    if enriched is not None:
+                        legitimate = combined_result.get("is_legitimate", True)
+                        if legitimate is not False:
+                            await _persist_incident(
+                                req,
+                                enriched,
+                                source="websocket",
+                                legitimate=bool(legitimate),
+                            )
 
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected")
