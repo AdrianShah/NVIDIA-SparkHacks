@@ -103,8 +103,8 @@ export default function App() {
     const timer = setTimeout(() => ctrl.abort(), 4000); // 4s timeout
     fetch(`${API_URL}/api/risk-map`, { signal: ctrl.signal })
       .then((r) => r.json())
-      .then((d) => { if (d.wards?.length) setWardScores(d.wards); })
-      .catch(() => {}) // stay on MOCK_WARDS
+      .then((d) => { if (d.wards?.length) setWardScores(d.wards); /* else stay on MOCK_WARDS */ })
+      .catch(() => { /* network error — stay on MOCK_WARDS */ })
       .finally(() => clearTimeout(timer));
   }, []);
 
