@@ -79,9 +79,9 @@ export default function MapView({ gps, wardScores, buildings = [], spatial, inci
       {/* ── Ward risk zones ── */}
       {wardScores.map((ward) => {
         const color = RISK_COLOR[ward.risk_level];
-        const radius = ward.risk_level === "CRITICAL" ? 2000
-                     : ward.risk_level === "HIGH"     ? 1600
-                     : ward.risk_level === "ELEVATED" ? 1200 : 900;
+        const radius = ward.risk_level === "CRITICAL" ? 800
+                     : ward.risk_level === "HIGH"     ? 600
+                     : ward.risk_level === "ELEVATED" ? 450 : 300;
         return (
           <React.Fragment key={ward.id}>
             <Circle

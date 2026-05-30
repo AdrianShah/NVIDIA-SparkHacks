@@ -183,19 +183,18 @@ function setupSources(map: maplibregl.Map) {
 }
 
 function setupLayers(map: maplibregl.Map) {
-  // Ward circles — large, shown at all zoom levels
+  // Ward dots — compact, score-labelled, clickable
   if (!map.getLayer("ward-fill")) {
     map.addLayer({
       id: "ward-fill", type: "circle", source: "wards",
       paint: {
-        "circle-radius": ["interpolate", ["linear"], ["zoom"], 9, 18, 13, 40],
+        "circle-radius": ["interpolate", ["linear"], ["zoom"], 9, 10, 12, 18, 15, 28],
         "circle-color": ["interpolate", ["linear"], ["get", "score"],
           0, "#22c55e", 40, "#eab308", 60, "#f97316", 80, "#ef4444"],
-        "circle-opacity": 0.35,
-        "circle-stroke-color": ["interpolate", ["linear"], ["get", "score"],
-          0, "#22c55e", 40, "#eab308", 60, "#f97316", 80, "#ef4444"],
-        "circle-stroke-width": 2,
-        "circle-stroke-opacity": 0.85,
+        "circle-opacity": 0.75,
+        "circle-stroke-color": "#ffffff",
+        "circle-stroke-width": 1.5,
+        "circle-stroke-opacity": 0.8,
       },
     });
   }
@@ -214,12 +213,12 @@ function setupLayers(map: maplibregl.Map) {
     });
   }
 
-  // Building dots — small, only visible at zoom 12+
+  // Building dots — visible from zoom 10 so users see them at city scale
   if (!map.getLayer("building-dot")) {
     map.addLayer({
-      id: "building-dot", type: "circle", source: "buildings", minzoom: 12,
+      id: "building-dot", type: "circle", source: "buildings", minzoom: 10,
       paint: {
-        "circle-radius": ["interpolate", ["linear"], ["zoom"], 12, 4, 16, 8],
+        "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 3, 13, 6, 16, 10],
         "circle-color": ["interpolate", ["linear"], ["get", "score"],
           0, "#ef4444", 35, "#f97316", 55, "#eab308", 69, "#facc15"],
         "circle-opacity": 0.9,

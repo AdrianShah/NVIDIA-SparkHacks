@@ -38,14 +38,14 @@ const RISK_COLOR: Record<string, string> = {
 };
 
 const MOCK_WARDS: WardScore[] = [
-  { id: "1", name: "Etobicoke North",      score: 87, lat: 43.7380, lng: -79.5765, risk_level: "CRITICAL", in_flood_zone: true,  prior_311: 6, watermain_age: 72 },
-  { id: "2", name: "York South-Weston",    score: 74, lat: 43.6900, lng: -79.4700, risk_level: "HIGH",     in_flood_zone: true,  prior_311: 4, watermain_age: 55 },
-  { id: "3", name: "Parkdale-High Park",   score: 62, lat: 43.6430, lng: -79.4490, risk_level: "HIGH",     in_flood_zone: false, prior_311: 3, watermain_age: 48 },
-  { id: "4", name: "Scarborough SW",       score: 55, lat: 43.7000, lng: -79.2300, risk_level: "ELEVATED", in_flood_zone: false, prior_311: 2, watermain_age: 30 },
-  { id: "5", name: "Downtown Core",        score: 45, lat: 43.6532, lng: -79.3832, risk_level: "ELEVATED", in_flood_zone: false, prior_311: 2, watermain_age: 60 },
-  { id: "6", name: "North York Centre",    score: 30, lat: 43.7615, lng: -79.4111, risk_level: "LOW",      in_flood_zone: false, prior_311: 1, watermain_age: 15 },
-  { id: "7", name: "Scarborough North",    score: 68, lat: 43.7800, lng: -79.2500, risk_level: "HIGH",     in_flood_zone: false, prior_311: 3, watermain_age: 40 },
-  { id: "8", name: "Humber River-Black Creek", score: 72, lat: 43.7200, lng: -79.5200, risk_level: "HIGH", in_flood_zone: true,  prior_311: 5, watermain_age: 58 },
+  { id: "1", name: "Etobicoke North",          score: 87, lat: 43.7380, lng: -79.5765, risk_level: "CRITICAL", in_flood_zone: true,  prior_311: 6, watermain_age: 72 },
+  { id: "2", name: "York South-Weston",        score: 74, lat: 43.7050, lng: -79.4850, risk_level: "HIGH",     in_flood_zone: true,  prior_311: 4, watermain_age: 55 },
+  { id: "3", name: "Parkdale-High Park",       score: 62, lat: 43.6550, lng: -79.4650, risk_level: "HIGH",     in_flood_zone: false, prior_311: 3, watermain_age: 48 },
+  { id: "4", name: "Scarborough Southwest",    score: 55, lat: 43.7350, lng: -79.2350, risk_level: "ELEVATED", in_flood_zone: false, prior_311: 2, watermain_age: 30 },
+  { id: "5", name: "Downtown Core",            score: 45, lat: 43.6700, lng: -79.3900, risk_level: "ELEVATED", in_flood_zone: false, prior_311: 2, watermain_age: 60 },
+  { id: "6", name: "North York Centre",        score: 30, lat: 43.7615, lng: -79.4111, risk_level: "LOW",      in_flood_zone: false, prior_311: 1, watermain_age: 15 },
+  { id: "7", name: "Scarborough North",        score: 68, lat: 43.7900, lng: -79.2600, risk_level: "HIGH",     in_flood_zone: false, prior_311: 3, watermain_age: 40 },
+  { id: "8", name: "Humber River-Black Creek", score: 72, lat: 43.7200, lng: -79.5200, risk_level: "HIGH",     in_flood_zone: true,  prior_311: 5, watermain_age: 58 },
 ];
 
 
