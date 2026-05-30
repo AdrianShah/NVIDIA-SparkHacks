@@ -95,6 +95,66 @@ def test_synthesize_rejects_empty_text():
     assert response.status_code == 422
 
 
+def test_audio_buffer_keeps_latest_30_seconds():
+    audio_buffer = bytearray()
+
+    server._append_audio_chunk(audio_buffer, b"a" * (server.PCM_MAX_BYTES + 10))
+
+    assert len(audio_buffer) == server.PCM_MAX_BYTES
+    assert audio_buffer == b"a" * server.PCM_MAX_BYTES
+
+
+def test_audio_transcript_replaces_default_but_not_explicit_transcript():
+    assert server._select_transcript("", "Basement flooding") == "Basement flooding"
+    assert server._select_transcript("Emergency incident reported", "Basement flooding") == "Basement flooding"
+    assert server._select_transcript("Kitchen fire", "Basement flooding") == "Kitchen fire"
+
+
+def test_websocket_audio_commit_emits_stt_transcript(monkeypatch):
+    monkeypatch.setattr(server, "transcribe_audio", lambda pcm_bytes: "Basement flooding")
+
+    with _client() as client:
+        with client.websocket_connect("/ws/stream") as websocket:
+            websocket.send_bytes(b"\x00\x00" * 160)
+            websocket.send_json({"type": "audio_commit"})
+            active = websocket.receive_json()
+            complete = websocket.receive_json()
+
+    assert active["node"] == "stt"
+    assert active["status"] == "active"
+    assert complete["node"] == "stt"
+    assert complete["status"] == "complete"
+    assert complete["data"]["transcript"] == "Basement flooding"
+    assert complete["data"]["used_fallback"] is False
+
+
+def test_websocket_audio_commit_without_audio_emits_error():
+    with _client() as client:
+        with client.websocket_connect("/ws/stream") as websocket:
+            websocket.send_json({"type": "audio_commit"})
+            event = websocket.receive_json()
+
+    assert event["node"] == "stt"
+    assert event["status"] == "error"
+    assert event["data"]["detail"] == "no buffered PCM audio"
+
+
+def test_websocket_audio_commit_without_whisper_uses_transcript_fallback(monkeypatch):
+    monkeypatch.setattr(server, "transcribe_audio", lambda pcm_bytes: "")
+
+    with _client() as client:
+        with client.websocket_connect("/ws/stream") as websocket:
+            websocket.send_bytes(b"\x00\x00" * 160)
+            websocket.send_json({"type": "audio_commit"})
+            websocket.receive_json()
+            complete = websocket.receive_json()
+
+    assert complete["node"] == "stt"
+    assert complete["status"] == "complete"
+    assert complete["data"]["transcript"] == ""
+    assert complete["data"]["used_fallback"] is True
+
+
 def test_websocket_mock_mode_emits_telemetry_events():
     payload = {
         "transcript": "There is flooding in my basement",

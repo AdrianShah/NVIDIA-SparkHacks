@@ -69,6 +69,36 @@ Response:
 { "node": "vision", "status": "active", "timestamp": "2026-05-29T21:05:33.412Z" }
 ```
 
+The same WebSocket also accepts live speech audio. Send raw mono PCM chunks as binary frames, then send an `audio_commit` JSON control frame:
+
+```json
+{ "type": "audio_commit" }
+```
+
+PCM format:
+
+- Sample rate: `16000 Hz`
+- Channels: `1` (mono)
+- Sample width: `16-bit signed little-endian`
+- Buffer: latest `30 seconds` per WebSocket connection
+
+The gateway responds with STT telemetry:
+
+```json
+{
+  "node": "stt",
+  "status": "complete",
+  "timestamp": "2026-05-30T12:00:00Z",
+  "data": {
+    "transcript": "There is flooding in my basement",
+    "audio_bytes": 64000,
+    "used_fallback": false
+  }
+}
+```
+
+Send the usual incident JSON frame after `audio_commit`. If its `transcript` is blank or a generic fallback message, the gateway injects the latest Whisper transcript into Person 3's AgentState. An explicit typed transcript still wins. Existing JSON-only clients continue to work unchanged.
+
 `POST /api/synthesize` accepts `{ "text": "..." }` and returns `audio/wav`. If Kokoro is unavailable, the gateway returns a short valid WAV tone so frontend playback can still be tested.
 
 ## Live Integration

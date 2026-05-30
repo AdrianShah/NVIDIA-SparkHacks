@@ -8,6 +8,7 @@ LangGraph engine is treated as an importable black box.
 import asyncio
 import datetime
 import io
+import json
 import logging
 import math
 import os
@@ -49,6 +50,17 @@ class GpsPayload(BaseModel):
 
 
 _DEFAULT_TRANSCRIPT = "Emergency incident reported"
+_TRANSCRIPT_FALLBACKS = {
+    "",
+    _DEFAULT_TRANSCRIPT.lower(),
+    "emergency incident reported at this location",
+}
+
+PCM_SAMPLE_RATE = 16000
+PCM_CHANNELS = 1
+PCM_SAMPLE_WIDTH_BYTES = 2
+PCM_MAX_SECONDS = 30
+PCM_MAX_BYTES = PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * PCM_MAX_SECONDS
 
 
 class IncidentRequest(BaseModel):
@@ -157,6 +169,19 @@ def transcribe_audio(pcm_bytes: bytes) -> str:
         return ""
 
 
+def _append_audio_chunk(audio_buffer: bytearray, pcm_bytes: bytes) -> None:
+    audio_buffer.extend(pcm_bytes)
+    if len(audio_buffer) > PCM_MAX_BYTES:
+        del audio_buffer[:-PCM_MAX_BYTES]
+
+
+def _select_transcript(payload_transcript: Any, audio_transcript: str) -> str:
+    raw_transcript = str(payload_transcript or "").strip()
+    if audio_transcript and raw_transcript.lower() in _TRANSCRIPT_FALLBACKS:
+        return audio_transcript
+    return raw_transcript or _DEFAULT_TRANSCRIPT
+
+
 def _fallback_wav(text: str) -> bytes:
     sample_rate = 16000
     duration_seconds = min(1.2, max(0.25, len(text) / 220))
@@ -262,6 +287,32 @@ def _event(node: str, status: TelemetryStatus, data: Optional[dict[str, Any]] = 
     return TelemetryEvent(node=node, status=status, timestamp=_timestamp(), data=data).model_dump(exclude_none=True)
 
 
+async def _commit_audio_buffer(websocket: WebSocket, audio_buffer: bytearray) -> str:
+    audio_bytes = bytes(audio_buffer)
+    audio_buffer.clear()
+
+    if not audio_bytes:
+        await websocket.send_json(
+            _event("stt", TelemetryStatus.error, {"detail": "no buffered PCM audio"})
+        )
+        return ""
+
+    await websocket.send_json(_event("stt", TelemetryStatus.active, {"audio_bytes": len(audio_bytes)}))
+    transcript = await asyncio.to_thread(transcribe_audio, audio_bytes)
+    await websocket.send_json(
+        _event(
+            "stt",
+            TelemetryStatus.complete,
+            {
+                "transcript": transcript,
+                "audio_bytes": len(audio_bytes),
+                "used_fallback": not bool(transcript),
+            },
+        )
+    )
+    return transcript
+
+
 def _result_to_response(result: dict[str, Any]) -> IncidentResponse:
     return IncidentResponse(
         report=result.get("final_dispatch_report", ""),
@@ -312,12 +363,40 @@ async def synthesize(req: SynthesizeRequest):
 async def websocket_stream(websocket: WebSocket):
     await websocket.accept()
     logger.info("WebSocket client connected")
+    audio_buffer = bytearray()
+    audio_transcript = ""
 
     try:
         while True:
-            data = await websocket.receive_json()
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                raise WebSocketDisconnect(message.get("code", 1000))
+
+            if message.get("bytes") is not None:
+                _append_audio_chunk(audio_buffer, message["bytes"])
+                continue
+
+            text = message.get("text")
+            if text is None:
+                continue
+
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                await websocket.send_json(
+                    _event("gateway", TelemetryStatus.error, {"detail": "invalid JSON control frame"})
+                )
+                continue
+
+            if data.get("type") == "audio_commit":
+                audio_transcript = await _commit_audio_buffer(websocket, audio_buffer)
+                continue
+
+            if data.get("audio_commit"):
+                audio_transcript = await _commit_audio_buffer(websocket, audio_buffer)
+
             req = IncidentRequest(
-                transcript=data.get("transcript", ""),
+                transcript=_select_transcript(data.get("transcript"), audio_transcript),
                 frame_b64=data.get("frame_b64"),
                 gps=GpsPayload(
                     lat=data.get("gps", {}).get("lat", 43.6532),
