@@ -18,13 +18,17 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body className="bg-gray-900 text-white">
         <ThemeProvider attribute="class" defaultTheme="dark" enableSystem={false}>
-          <header className="p-4">
+          <header style={{ position: "absolute", top: 10, left: 12, zIndex: 30, display: "flex", alignItems: "center", gap: 8, pointerEvents: "none" }}>
             <Image
               src="/logo.png"
-              alt="Logo"
-              width={120}
-              height={120}
+              alt="Delation"
+              width={36}
+              height={36}
+              style={{ mixBlendMode: "screen", filter: "drop-shadow(0 0 4px rgba(59,130,246,0.6))" }}
             />
+            <span style={{ fontWeight: 700, fontSize: 15, letterSpacing: "0.08em", color: "#fff", fontFamily: "ui-monospace, monospace", textShadow: "0 0 10px rgba(59,130,246,0.5)" }}>
+              DELATION
+            </span>
           </header>
           {children}
         </ThemeProvider>
