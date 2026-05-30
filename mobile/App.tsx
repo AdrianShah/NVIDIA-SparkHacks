@@ -245,11 +245,18 @@ export default function App() {
 
         {/* Top bar overlay */}
         <View style={styles.topBar}>
-          <View>
-            <Text style={[styles.appTitle, { color: theme.teal }]}>DELATION</Text>
-            <Text style={[styles.appSubtitle, { color: theme.muted }]}>
-              ?? {gps.lat.toFixed(4)}, {gps.lng.toFixed(4)}
-            </Text>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <Image
+              source={require("./assets/logo.png")}
+              style={{ width: 36, height: 36, borderRadius: 18 }}
+              resizeMode="contain"
+            />
+            <View>
+              <Text style={[styles.appTitle, { color: theme.teal }]}>DELATION</Text>
+              <Text style={[styles.appSubtitle, { color: theme.muted }]}>
+                📍 {gps.lat.toFixed(4)}, {gps.lng.toFixed(4)}
+              </Text>
+            </View>
           </View>
           <View style={styles.topBarRight}>
             {confirmedCount > 0 && (
