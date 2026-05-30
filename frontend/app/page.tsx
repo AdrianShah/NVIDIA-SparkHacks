@@ -260,17 +260,17 @@ export default function Dashboard() {
         <div style={{ width: 320, flexShrink: 0, display: "flex", flexDirection: "column", borderLeft: "1px solid var(--border)", height: "100%", background: "var(--bg-sidebar)", overflowY: "auto" }}>
           {/* Header */}
           <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <Image
                 src="/logo.png"
                 alt="Delation"
-                width={28}
-                height={28}
-                style={{ mixBlendMode: "screen", filter: "drop-shadow(0 0 3px rgba(59,130,246,0.7))" }}
+                width={40}
+                height={40}
+                style={{ mixBlendMode: "screen", filter: "drop-shadow(0 0 3px rgba(59,130,246,0.7))", flexShrink: 0 }}
               />
-              <div>
-                <h1 style={{ fontWeight: 700, fontSize: 14, letterSpacing: "0.05em", color: "var(--text)", margin: 0 }}>Delation</h1>
-                <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0 }}>Urban Risk Intelligence · Toronto</p>
+              <div style={{ display: "flex", flexDirection: "column", justifyContent: "center" }}>
+                <h1 style={{ fontWeight: 700, fontSize: 14, letterSpacing: "0.05em", color: "var(--text)", margin: 0, lineHeight: 1.2 }}>Delation</h1>
+                <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0, lineHeight: 1.2 }}>Urban Risk Intelligence · Toronto</p>
               </div>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
