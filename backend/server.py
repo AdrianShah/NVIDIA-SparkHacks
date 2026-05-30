@@ -5,12 +5,14 @@ Person 2 owns this FastAPI boundary. It is the only network-facing process:
 frontend requests enter here, STT/TTS adapters are called here, and the
 LangGraph engine is treated as an importable black box.
 """
+import asyncio
 import datetime
 import io
 import logging
 import math
 import os
 import struct
+import wave
 from contextlib import asynccontextmanager
 from enum import Enum
 from typing import Any, Optional
@@ -46,18 +48,20 @@ class GpsPayload(BaseModel):
     lng: float = Field(default=-79.3832, ge=-180, le=180)
 
 
+_DEFAULT_TRANSCRIPT = "Emergency incident reported"
+
+
 class IncidentRequest(BaseModel):
-    transcript: str = Field(..., min_length=1)
+    transcript: str = Field(default=_DEFAULT_TRANSCRIPT, min_length=1)
     frame_b64: Optional[str] = None
     gps: GpsPayload = Field(default_factory=GpsPayload)
 
-    @field_validator("transcript")
+    @field_validator("transcript", mode="before")
     @classmethod
-    def transcript_must_not_be_blank(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("transcript must not be blank")
-        return value
+    def transcript_fallback(cls, value: Any) -> str:
+        if not value or (isinstance(value, str) and not value.strip()):
+            return _DEFAULT_TRANSCRIPT
+        return value.strip() if isinstance(value, str) else str(value)
 
 
 class IncidentResponse(BaseModel):
@@ -98,10 +102,13 @@ async def lifespan(app: FastAPI):
     global _whisper_model, _kokoro_model
 
     logger.info("Loading Toronto Open Data into memory...")
-    try:
+    if MOCK_MODE:
+        try:
+            toronto_loader.load_all()
+        except Exception as exc:
+            logger.warning("Spatial loader unavailable (%s) - continuing in mock mode", exc)
+    else:
         toronto_loader.load_all()
-    except Exception as exc:
-        logger.warning("Spatial loader unavailable (%s) - gateway will continue", exc)
     logger.info("Spatial data ready")
 
     if MOCK_MODE:
@@ -158,8 +165,6 @@ def _fallback_wav(text: str) -> bytes:
     frequency = 440
 
     buf = io.BytesIO()
-    import wave
-
     with wave.open(buf, "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
@@ -176,8 +181,6 @@ def synthesize_speech(text: str) -> bytes:
     if _kokoro_model is None:
         return _fallback_wav(text)
     try:
-        import wave
-
         samples, sample_rate = _kokoro_model.create(text, voice="af_bella", speed=1.0, lang="en-us")
         buf = io.BytesIO()
         with wave.open(buf, "wb") as wf:
@@ -225,9 +228,9 @@ def _mock_incident_response() -> IncidentResponse:
                 "status": "Operational",
             },
             "closest_hydrants": [
-                {"id": 1042, "distance_meters": 38.5, "status": "Operational"},
-                {"id": 1088, "distance_meters": 74.2, "status": "Operational"},
-                {"id": 1170, "distance_meters": 96.7, "status": "Maintenance due"},
+                {"id": 1042, "distance_meters": 38.5, "lat": 43.6535, "lng": -79.3957, "status": "Operational"},
+                {"id": 1088, "distance_meters": 74.2, "lat": 43.6541, "lng": -79.3948, "status": "Operational"},
+                {"id": 1170, "distance_meters": 96.7, "lat": 43.6525, "lng": -79.3970, "status": "Maintenance due"},
             ],
             "building_specs": {
                 "address": "123 Example St",
@@ -314,7 +317,7 @@ async def websocket_stream(websocket: WebSocket):
         while True:
             data = await websocket.receive_json()
             req = IncidentRequest(
-                transcript=data.get("transcript") or "Emergency incident reported",
+                transcript=data.get("transcript", ""),
                 frame_b64=data.get("frame_b64"),
                 gps=GpsPayload(
                     lat=data.get("gps", {}).get("lat", 43.6532),
@@ -323,10 +326,20 @@ async def websocket_stream(websocket: WebSocket):
             )
 
             if MOCK_MODE:
-                for node in ("orchestrator", "vision", "localizer", "compiler"):
+                mock_update = _mock_agent_update()
+                node_delays = [
+                    ("orchestrator", 0.5, None),
+                    ("vision", 1.0, {"vision_analysis": mock_update["vision_analysis"]}),
+                    ("localizer", 0.8, {"spatial_data_results": mock_update["spatial_data_results"]}),
+                    ("compiler", 1.2, {
+                        "final_dispatch_report": mock_update["final_dispatch_report"],
+                        "urgency_level": mock_update["urgency_level"],
+                    }),
+                ]
+                for node, delay, node_data in node_delays:
                     await websocket.send_json(_event(node, TelemetryStatus.active))
-                    await websocket.send_json(_event(node, TelemetryStatus.complete))
-                await websocket.send_json(_event("compiler", TelemetryStatus.complete, _mock_agent_update()))
+                    await asyncio.sleep(delay)
+                    await websocket.send_json(_event(node, TelemetryStatus.complete, node_data))
                 continue
 
             initial_state = _build_initial_state(req)
