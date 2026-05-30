@@ -2,41 +2,58 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Theme tokens ──────────────────────────────────────────────────────────── */
 :root {
-  --bg: #050F14;
-  --teal: #00D1B2;
+  --bg:         #f8fafc;
+  --bg-card:    #ffffff;
+  --bg-sidebar: #f1f5f9;
+  --border:     #e2e8f0;
+  --text:       #0f172a;
+  --text-muted: #64748b;
+  --teal:       #0d9488;
+  --teal-light: #99f6e4;
+  --red:        #dc2626;
+  --amber:      #d97706;
+  --green:      #16a34a;
+}
+
+.dark {
+  --bg:         #050f14;
+  --bg-card:    #0d1f2d;
+  --bg-sidebar: #071a24;
+  --border:     #134e4a;
+  --text:       #e5e7eb;
+  --text-muted: #6b7280;
+  --teal:       #2dd4bf;
+  --teal-light: #134e4a;
+  --red:        #ef4444;
+  --amber:      #f97316;
+  --green:      #22c55e;
 }
 
 body {
   background-color: var(--bg);
-  color: #e5e7eb;
+  color: var(--text);
   overflow: hidden;
+  transition: background-color 0.2s, color 0.2s;
 }
 
-/* Mapbox GL CSS is imported in MapView.tsx */
+::-webkit-scrollbar       { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--teal-light); border-radius: 2px; }
 
-/* Thin scrollbar */
-::-webkit-scrollbar {
-  width: 4px;
+.maplibregl-popup-content {
+  background:    var(--bg-card);
+  color:         var(--text);
+  border:        1px solid var(--border);
+  border-radius: 8px;
+  padding:       10px 14px;
+  font-size:     12px;
+  font-family:   ui-monospace, monospace;
+  box-shadow:    0 4px 24px rgba(0,0,0,0.3);
+  max-width:     260px;
 }
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-::-webkit-scrollbar-thumb {
-  background: #134e4a;
-  border-radius: 2px;
-}
-
-/* Mapbox popup dark theme */
-.mapboxgl-popup-content {
-  background: #0d1f2d;
-  color: #e5e7eb;
-  border: 1px solid #134e4a;
-  border-radius: 6px;
-  padding: 8px 12px;
-  font-size: 12px;
-  font-family: ui-monospace, monospace;
-}
-.mapboxgl-popup-tip {
-  border-top-color: #0d1f2d !important;
-}
+.maplibregl-popup-tip          { border-top-color: var(--bg-card) !important; }
+.maplibregl-ctrl-group         { background: var(--bg-card) !important; border: 1px solid var(--border) !important; }
+.maplibregl-ctrl button        { background-color: var(--bg-card) !important; color: var(--text) !important; }
+.maplibregl-canvas-container   { cursor: default; }

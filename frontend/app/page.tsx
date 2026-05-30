@@ -1,376 +1,323 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
-import AgentCard, { NodeStatus } from "@/components/AgentCard";
-import DispatchReport from "@/components/DispatchReport";
-import CameraCapture from "@/components/CameraCapture";
-import type { SpatialData } from "@/components/MapView";
+import { useTheme } from "next-themes";
+import { Sun, Moon, AlertTriangle, CheckCheck, ChevronUp, ChevronDown, MapPin } from "lucide-react";
+import WardBriefingPanel from "@/components/WardBriefingPanel";
+import IncidentFeed      from "@/components/IncidentFeed";
+import ReportModal       from "@/components/ReportModal";
+import ZoneDetailPanel   from "@/components/ZoneDetailPanel";
+import type { WardFeature, IncidentMarker } from "@/components/MapView";
 
-// SSR disabled — mapbox-gl uses browser globals
 const MapView = dynamic(() => import("@/components/MapView"), {
-  ssr: false,
-  loading: () => <div className="w-full h-full bg-gray-950 animate-pulse" />,
+  ssr:     false,
+  loading: () => <div style={{ width: "100%", height: "100%", background: "var(--bg-card)" }} />,
 });
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
-const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8080/ws/stream";
+const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
+const WS  = process.env.NEXT_PUBLIC_WS_URL  ?? "ws://localhost:8080/ws/stream";
 
-type UrgencyLevel = "LOW" | "HIGH" | "CRITICAL";
+type AgentStatus = "idle" | "active" | "complete" | "error";
 
-interface AgentNodeDef {
-  name: string;
-  label: string;
-  status: NodeStatus;
-  detail: string;
-}
-
-const INITIAL_NODES: AgentNodeDef[] = [
-  { name: "orchestrator", label: "Orchestrator", status: "idle", detail: "" },
-  { name: "vision", label: "Vision", status: "idle", detail: "" },
-  { name: "localizer", label: "Localizer", status: "idle", detail: "" },
-  { name: "compiler", label: "Compiler", status: "idle", detail: "" },
+const AGENT_NODES = [
+  { key: "orchestrator", label: "Orchestrator", model: "Mistral Nemotron" },
+  { key: "vision",       label: "Vision",       model: "Llama 4 Maverick" },
+  { key: "localizer",    label: "Localizer",    model: "GeoPandas+GPU"    },
+  { key: "compiler",     label: "Compiler",     model: "Nemotron 30B"     },
 ];
 
-export default function HomePage() {
-  const [isActive, setIsActive] = useState(false);
-  const [gps, setGps] = useState({ lat: 43.6532, lng: -79.3832 });
-  const [nodes, setNodes] = useState<AgentNodeDef[]>(INITIAL_NODES);
-  const [report, setReport] = useState("");
-  const [vision, setVision] = useState<any>(null);
-  const [spatial, setSpatial] = useState<SpatialData | null>(null);
-  const [urgency, setUrgency] = useState<UrgencyLevel>("LOW");
+const DOT: Record<AgentStatus, string> = {
+  idle:     "#6b7280",
+  active:   "#2dd4bf",
+  complete: "#22c55e",
+  error:    "#ef4444",
+};
+
+export default function Dashboard() {
+  const { theme, setTheme } = useTheme();
+  const isDark = theme === "dark";
+
+  const [wardScores,   setWardScores]   = useState<WardFeature[]>([]);
+  const [incidents,    setIncidents]    = useState<IncidentMarker[]>([]);
+  const [allIncidents, setAllIncidents] = useState<any[]>([]);
+  const [confirmed,    setConfirmed]    = useState(0);
+  const [showReport,   setShowReport]   = useState(false);
+  const [selectedWard, setSelectedWard] = useState<WardFeature | null>(null);
+  const [agentStates,  setAgentStates]  = useState<Record<string, AgentStatus>>(
+    Object.fromEntries(AGENT_NODES.map((n) => [n.key, "idle"]))
+  );
+  const [dispatchText, setDispatchText] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
-  const [connectionType, setConnectionType] = useState<"ws" | "http">("http");
-  const [tokenCount, setTokenCount] = useState(0);
+  const [liveGps,      setLiveGps]      = useState<{ lat: number; lng: number } | null>(null);
 
-  const currentFrameRef = useRef<string | null>(null);
-  const transcriptRef = useRef<string>("");
-  const isProcessingRef = useRef(false);
-  const wsRef = useRef<WebSocket | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Mobile: panel expanded/collapsed
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [isMobile,  setIsMobile]  = useState(false);
 
-  // Attempt GPS
+  const wsRef      = useRef<WebSocket | null>(null);
+  const watchIdRef = useRef<number | null>(null);
+
+  // ── Detect mobile ───────────────────────────────────────────────────────────
   useEffect(() => {
-    navigator.geolocation?.getCurrentPosition(
-      (pos) => setGps({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
-      () => {}
-    );
+    const check = () => setIsMobile(window.innerWidth < 768);
+    check();
+    window.addEventListener("resize", check);
+    return () => window.removeEventListener("resize", check);
   }, []);
 
-  const resetNodes = () =>
-    setNodes(INITIAL_NODES.map((n) => ({ ...n, status: "idle", detail: "" })));
-
-  const setNodeStatus = (name: string, status: NodeStatus, detail = "") =>
-    setNodes((prev) =>
-      prev.map((n) => (n.name === name ? { ...n, status, detail } : n))
+  // ── Live GPS ─────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!navigator.geolocation) return;
+    watchIdRef.current = navigator.geolocation.watchPosition(
+      (pos) => setLiveGps({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      ()    => setLiveGps({ lat: 43.6532, lng: -79.3832 }),
+      { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
     );
-
-  // ── WebSocket mode ──────────────────────────────────────────────────────────
-  const setupWebSocket = useCallback(() => {
-    try {
-      const ws = new WebSocket(WS_URL);
-
-      ws.onopen = () => {
-        setConnectionType("ws");
-        wsRef.current = ws;
-      };
-
-      ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        const { node, status, data: nodeData } = data;
-
-        if (node && status) {
-          let detail = "";
-          if (node === "vision" && nodeData?.vision_analysis) {
-            detail = `${nodeData.vision_analysis.hazard_type ?? ""} · ${nodeData.vision_analysis.severity_scale ?? "?"}/10`;
-          } else if (node === "localizer" && nodeData?.spatial_data_results) {
-            const h = nodeData.spatial_data_results.closest_hydrants?.[0];
-            detail = h ? `Hydrant @ ${h.distance_meters} m` : "";
-          }
-          setNodeStatus(node, status as NodeStatus, detail);
-        }
-
-        if (nodeData?.final_dispatch_report) {
-          setReport(nodeData.final_dispatch_report);
-          setIsProcessing(false);
-        }
-        if (nodeData?.urgency_level) setUrgency(nodeData.urgency_level as UrgencyLevel);
-        if (nodeData?.vision_analysis) setVision(nodeData.vision_analysis);
-        if (nodeData?.spatial_data_results) setSpatial(nodeData.spatial_data_results);
-      };
-
-      ws.onerror = () => {
-        setConnectionType("http");
-        wsRef.current = null;
-      };
-
-      ws.onclose = () => {
-        wsRef.current = null;
-      };
-    } catch {
-      setConnectionType("http");
-    }
+    return () => { if (watchIdRef.current !== null) navigator.geolocation.clearWatch(watchIdRef.current); };
   }, []);
 
-  // ── HTTP polling mode ───────────────────────────────────────────────────────
-  const processIncident = useCallback(async () => {
-    if (isProcessingRef.current) return;
-    isProcessingRef.current = true;
-    setIsProcessing(true);
-
-    // Optimistic node progression
-    setNodeStatus("orchestrator", "active");
-
-    try {
-      const res = await fetch(`${API_URL}/api/incident`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          transcript: transcriptRef.current || "Emergency incident reported at this location",
-          frame_b64: currentFrameRef.current,
-          gps,
-        }),
+  // ── Load ward risk map ───────────────────────────────────────────────────────
+  useEffect(() => {
+    fetch(`${API}/api/risk-map`)
+      .then((r) => r.json())
+      .then((d) => setWardScores(d.wards ?? []))
+      .catch(() => {
+        setWardScores([
+          { id: "1", name: "Etobicoke North",      score: 87, lat: 43.7380, lng: -79.5765, risk_level: "CRITICAL", in_flood_zone: true,  prior_311: 6, watermain_age: 72 },
+          { id: "2", name: "York South-Weston",     score: 74, lat: 43.6900, lng: -79.4700, risk_level: "HIGH",     in_flood_zone: true,  prior_311: 4, watermain_age: 55 },
+          { id: "3", name: "Parkdale-High Park",    score: 62, lat: 43.6430, lng: -79.4490, risk_level: "HIGH",     in_flood_zone: false, prior_311: 3, watermain_age: 48 },
+          { id: "4", name: "Scarborough Southwest", score: 55, lat: 43.7000, lng: -79.2300, risk_level: "ELEVATED", in_flood_zone: false, prior_311: 2, watermain_age: 30 },
+          { id: "5", name: "North York Centre",     score: 38, lat: 43.7615, lng: -79.4111, risk_level: "LOW",      in_flood_zone: false, prior_311: 1, watermain_age: 15 },
+          { id: "6", name: "Downtown Core",         score: 45, lat: 43.6532, lng: -79.3832, risk_level: "ELEVATED", in_flood_zone: false, prior_311: 2, watermain_age: 60 },
+        ]);
       });
+  }, []);
 
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-
-      // Mark all nodes complete when response arrives
-      setNodes(
-        INITIAL_NODES.map((n) => ({
-          ...n,
-          status: "complete",
-          detail:
-            n.name === "vision"
-              ? `${data.vision?.hazard_type ?? ""} · ${data.vision?.severity_scale ?? "?"}/10`
-              : n.name === "localizer"
-              ? `${data.spatial?.closest_hydrants?.[0]?.distance_meters ?? "?"} m to hydrant`
-              : "",
-        }))
-      );
-
-      setReport(data.report ?? "");
-      setUrgency((data.urgency as UrgencyLevel) ?? "HIGH");
-      setVision(data.vision ?? null);
-      setSpatial(data.spatial ?? null);
-      setTokenCount((c) => c + (data.report?.split(" ").length ?? 0));
-    } catch (err) {
-      setNodes((prev) =>
-        prev.map((n) => (n.status === "active" ? { ...n, status: "error" } : n))
-      );
-    } finally {
-      setIsProcessing(false);
-      isProcessingRef.current = false;
-    }
-  }, [gps]);
-
-  // Send via WS if available, otherwise HTTP
-  const sendIncident = useCallback(() => {
-    const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      setIsProcessing(true);
-      resetNodes();
-      ws.send(
-        JSON.stringify({
-          transcript: transcriptRef.current || "Emergency incident reported",
-          frame_b64: currentFrameRef.current,
-          gps,
-        })
-      );
-    } else {
-      resetNodes();
-      processIncident();
-    }
-  }, [gps, processIncident]);
-
-  // ── Start / stop ────────────────────────────────────────────────────────────
-  const startIncident = () => {
-    setIsActive(true);
-    setReport("");
-    resetNodes();
-    setupWebSocket();
-
-    // Poll every 6 s (WebSocket will take over if it connects)
-    const id = setInterval(() => {
-      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-        if (currentFrameRef.current) processIncident();
+  // ── WebSocket ────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    const ws = new WebSocket(WS);
+    wsRef.current = ws;
+    ws.onmessage = (e) => {
+      const evt = JSON.parse(e.data);
+      if (evt.node) {
+        setAgentStates((p) => ({ ...p, [evt.node]: "complete" }));
+        if (evt.data?.final_dispatch_report) setDispatchText(evt.data.final_dispatch_report);
+        if (evt.data?.escalated) setConfirmed((c) => c + 1);
       }
-    }, 6000);
-    pollRef.current = id;
+    };
+    ws.onerror = () => {};
+    return () => ws.close();
+  }, []);
 
-    // Immediate first call
-    setTimeout(() => {
-      if (currentFrameRef.current) sendIncident();
-    }, 3000);
-  };
+  // ── Submit incident ──────────────────────────────────────────────────────────
+  const handleIncidentSubmit = useCallback(async (
+    transcript: string, frame_b64: string, gps: { lat: number; lng: number }
+  ) => {
+    setIsProcessing(true);
+    setDispatchText("");
+    setAgentStates(Object.fromEntries(AGENT_NODES.map((n) => [n.key, "idle"])));
+    setAgentStates((p) => ({ ...p, orchestrator: "active" }));
 
-  const stopIncident = () => {
-    setIsActive(false);
-    wsRef.current?.close();
-    wsRef.current = null;
-    if (pollRef.current) clearInterval(pollRef.current);
-    resetNodes();
-  };
+    const res  = await fetch(`${API}/api/incident`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ transcript, frame_b64, gps }),
+    });
+    const data = await res.json();
 
-  // Urgency badge colour
-  const urgencyStyle = {
-    CRITICAL: "text-red-400 border-red-500/50",
-    HIGH: "text-orange-400 border-orange-500/50",
-    LOW: "text-green-400 border-green-500/50",
-  }[urgency] ?? "text-gray-400 border-gray-700";
+    setAgentStates(Object.fromEntries(AGENT_NODES.map((n) => [n.key, "complete"])));
+    setDispatchText(data.report ?? "");
+    setIsProcessing(false);
 
-  return (
-    <div className="flex h-screen w-screen overflow-hidden" style={{ background: "#050F14" }}>
-      {/* ── Left panel — Map (60%) ── */}
-      <div className="relative flex-shrink-0" style={{ width: "60%" }}>
-        <MapView gps={gps} spatial={spatial} urgency={urgency} isActive={isActive} />
+    if (data.legitimate !== false) {
+      const newInc: IncidentMarker = { id: Date.now(), gps, urgency: data.urgency ?? "HIGH", transcript, timestamp: new Date().toISOString() };
+      setIncidents((p) => [...p, newInc]);
+      setAllIncidents((p) => [{ ...newInc, ward_risk: data.ward_risk ?? 0, escalated: data.escalated ?? false }, ...p]);
+      if (data.escalated) setConfirmed((c) => c + 1);
+      fetch(`${API}/api/risk-map`).then((r) => r.json()).then((d) => { if (d.wards?.length) setWardScores(d.wards); });
+    }
+    return { legitimate: data.legitimate !== false, urgency: data.urgency ?? "HIGH" };
+  }, []);
 
-        {/* Camera overlay */}
-        <div className="absolute bottom-4 left-4 z-[1000]">
-          <CameraCapture
-            isActive={isActive}
-            onFrame={(f) => { currentFrameRef.current = f; }}
-            onTranscript={(t) => { transcriptRef.current = t; }}
-          />
-        </div>
-
-        {/* Urgency badge */}
-        {isActive && (
-          <div className={`absolute top-4 left-4 z-[1000] rounded border px-3 py-1.5 bg-black/70 backdrop-blur flex items-center gap-2 ${urgencyStyle}`}>
-            <span className="w-2 h-2 rounded-full bg-current animate-pulse" />
-            <span className="text-xs font-mono font-bold tracking-widest">{urgency} INCIDENT LIVE</span>
+  // ── Shared panel content ─────────────────────────────────────────────────────
+  const PanelContent = (
+    <>
+      {/* Stats */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", borderBottom: "1px solid var(--border)", background: "var(--border)", gap: "1px" }}>
+        {[
+          { label: "Wards",    value: wardScores.length,                                              color: undefined },
+          { label: "Critical", value: wardScores.filter((w) => w.risk_level === "CRITICAL").length,   color: "#ef4444" },
+          { label: "Reports",  value: allIncidents.length,                                            color: undefined },
+        ].map((s) => (
+          <div key={s.label} style={{ padding: "8px 0", textAlign: "center", background: "var(--bg-sidebar)" }}>
+            <p style={{ fontSize: 16, fontWeight: 700, fontFamily: "monospace", color: s.color ?? "var(--text)", margin: 0 }}>{s.value}</p>
+            <p style={{ fontSize: 10, color: "var(--text-muted)", margin: 0 }}>{s.label}</p>
           </div>
-        )}
+        ))}
+      </div>
 
-        {/* Start / Stop button */}
-        <div className="absolute top-4 right-4 z-[1000] flex flex-col gap-2 items-end">
-          <button
-            onClick={isActive ? stopIncident : startIncident}
-            className={`px-5 py-2 rounded-lg font-mono font-bold text-sm tracking-wider transition-all shadow-lg ${
-              isActive
-                ? "bg-red-600 hover:bg-red-700 text-white shadow-red-900/40"
-                : "bg-teal-600 hover:bg-teal-700 text-white shadow-teal-900/40"
-            }`}
-          >
-            {isActive ? "◼ STOP" : "▶ START INCIDENT"}
-          </button>
-          {isActive && (
-            <div className="text-[10px] font-mono text-gray-600 bg-black/50 rounded px-2 py-0.5">
-              {connectionType.toUpperCase()} · {gps.lat.toFixed(4)},{gps.lng.toFixed(4)}
+      <WardBriefingPanel wardScores={wardScores} onWardClick={(w) => { setSelectedWard(w); if (isMobile) setPanelOpen(false); }} />
+      <IncidentFeed incidents={allIncidents} />
+
+      {/* Agent pipeline */}
+      <div style={{ padding: "10px 12px", borderBottom: "1px solid var(--border)" }}>
+        <p style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--text-muted)", marginBottom: 8 }}>Agent Pipeline</p>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 4 }}>
+          {AGENT_NODES.map((n) => (
+            <div key={n.key} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, padding: "8px 4px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--bg-card)", textAlign: "center" }}>
+              <span style={{ width: 8, height: 8, borderRadius: "50%", background: DOT[agentStates[n.key]], display: "block", ...(agentStates[n.key] === "active" ? { animation: "pulse 1s infinite" } : {}) }} />
+              <span style={{ fontSize: 10, fontWeight: 600, color: "var(--text)" }}>{n.label}</span>
+              <span style={{ fontSize: 9, color: "var(--text-muted)" }}>{n.model}</span>
             </div>
-          )}
+          ))}
         </div>
       </div>
 
-      {/* ── Right panel (40%) ── */}
-      <div className="flex flex-col flex-1 border-l border-teal-950/60 min-w-0">
-        {/* Header */}
-        <div className="px-5 py-3 border-b border-teal-950/60 flex items-center justify-between flex-shrink-0">
-          <div>
-            <h1 className="text-teal-400 font-mono font-bold text-base tracking-widest">
-              CIVICVOX-OMNI
-            </h1>
-            <p className="text-gray-600 text-[11px] font-mono mt-0.5">
-              Edge Emergency Intelligence · City of Toronto
-            </p>
-          </div>
-          <div className="text-right">
-            <p className="text-[10px] font-mono text-gray-600">NVIDIA GB10 · LOCAL INFERENCE</p>
-            <p className="text-[10px] font-mono text-gray-700 mt-0.5">
-              {tokenCount > 0 ? `${tokenCount} tokens generated` : "Offline ready"}
-            </p>
-          </div>
+      {/* Dispatch report */}
+      {dispatchText && (
+        <div style={{ padding: "10px 12px", borderBottom: "1px solid var(--border)", maxHeight: 160, overflowY: "auto" }}>
+          <p style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--text-muted)", marginBottom: 6 }}>Dispatch Report</p>
+          <pre style={{ fontSize: 10, whiteSpace: "pre-wrap", fontFamily: "monospace", color: "var(--text)", margin: 0 }}>{dispatchText}</pre>
+        </div>
+      )}
+
+      {/* Report button */}
+      <div style={{ padding: "12px", marginTop: "auto" }}>
+        <button
+          onClick={() => setShowReport(true)}
+          disabled={isProcessing}
+          style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "10px 0", borderRadius: 12, background: "var(--red)", color: "#fff", fontWeight: 600, fontSize: 14, border: "none", cursor: isProcessing ? "not-allowed" : "pointer", opacity: isProcessing ? 0.5 : 1 }}
+        >
+          <AlertTriangle style={{ width: 16, height: 16 }} />
+          {isProcessing ? "Processing…" : "Report Incident"}
+        </button>
+        <p style={{ textAlign: "center", fontSize: 10, marginTop: 6, color: "var(--text-muted)" }}>
+          Powered by NVIDIA GB10 · All inference local
+        </p>
+      </div>
+    </>
+  );
+
+  // ── Render ───────────────────────────────────────────────────────────────────
+  return (
+    <div style={{ height: "100dvh", overflow: "hidden", background: "var(--bg)", color: "var(--text)", display: "flex", flexDirection: isMobile ? "column" : "row" }}>
+
+      {/* ── Map area ── */}
+      <div style={{ flex: 1, position: "relative", minHeight: 0, minWidth: 0 }}>
+        <MapView wardScores={wardScores} incidents={incidents} onWardClick={setSelectedWard} isDark={isDark} />
+
+        {selectedWard && <ZoneDetailPanel ward={selectedWard} onClose={() => setSelectedWard(null)} />}
+
+        {/* Map legend */}
+        <div style={{ position: "absolute", bottom: isMobile ? 72 : 16, left: 12, background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 12px", fontSize: 11, fontFamily: "monospace", color: "var(--text-muted)" }}>
+          {[["#ef4444", "CRITICAL >80"], ["#f97316", "HIGH >60"], ["#eab308", "ELEVATED >40"], ["#22c55e", "LOW <40"]].map(([color, label]) => (
+            <div key={label} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3 }}>
+              <span style={{ width: 10, height: 10, borderRadius: 2, background: color, display: "inline-block" }} />
+              {label}
+            </div>
+          ))}
         </div>
 
-        {/* Agent telemetry — top half */}
-        <div className="flex-1 p-4 border-b border-teal-950/60 overflow-hidden">
-          <p className="text-[10px] font-mono text-gray-600 uppercase tracking-widest mb-3">
-            ── Agent Pipeline
-          </p>
-
-          <div className="grid grid-cols-2 gap-2.5 mb-4">
-            {nodes.map((n) => (
-              <AgentCard key={n.name} name={n.name} label={n.label} status={n.status} detail={n.detail} />
-            ))}
-          </div>
-
-          {/* Vision quick stats */}
-          {vision && (
-            <div className="rounded border border-teal-900/40 bg-teal-950/20 p-3 space-y-1.5">
-              <p className="text-[10px] font-mono text-teal-600 uppercase tracking-widest">
-                Vision Analysis
-              </p>
-              <div className="grid grid-cols-2 gap-x-4 gap-y-1">
-                {[
-                  ["Hazard", vision.hazard_type],
-                  ["Severity", `${vision.severity_scale ?? "?"}/10`],
-                  ["Structural Risk", vision.structural_risk ? "YES" : "NO"],
-                  vision.water_depth_m != null
-                    ? ["Water Depth", `${vision.water_depth_m} m`]
-                    : ["Location Cues", vision.location_cues || "—"],
-                ].map(([k, v]) => (
-                  <div key={k} className="flex gap-1">
-                    <span className="text-[11px] font-mono text-gray-600 flex-shrink-0">{k}:</span>
-                    <span className={`text-[11px] font-mono truncate ${
-                      k === "Severity" && (vision.severity_scale ?? 0) >= 7 ? "text-red-400" :
-                      k === "Structural Risk" && vision.structural_risk ? "text-red-400" :
-                      "text-gray-300"
-                    }`}>{String(v)}</span>
-                  </div>
-                ))}
+        {/* Mobile: floating header + report button over map */}
+        {isMobile && (
+          <>
+            {/* Top bar */}
+            <div style={{ position: "absolute", top: 0, left: 0, right: 0, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", background: "rgba(0,0,0,0.6)", backdropFilter: "blur(8px)" }}>
+              <div>
+                <span style={{ fontWeight: 700, fontSize: 14, color: "#fff" }}>Delation</span>
+                {liveGps && (
+                  <span style={{ fontSize: 10, color: "#9ca3af", marginLeft: 8, fontFamily: "monospace" }}>
+                    <MapPin style={{ width: 10, height: 10, display: "inline" }} /> {liveGps.lat.toFixed(4)}, {liveGps.lng.toFixed(4)}
+                  </span>
+                )}
+              </div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <span style={{ fontSize: 11, color: "#4ade80", fontFamily: "monospace" }}>
+                  <CheckCheck style={{ width: 12, height: 12, display: "inline", marginRight: 3 }} />{confirmed}
+                </span>
+                <button onClick={() => setTheme(isDark ? "light" : "dark")} style={{ background: "rgba(255,255,255,0.1)", border: "none", borderRadius: 6, padding: "4px 6px", color: "#fff", cursor: "pointer" }}>
+                  {isDark ? <Sun style={{ width: 14, height: 14 }} /> : <Moon style={{ width: 14, height: 14 }} />}
+                </button>
               </div>
             </div>
-          )}
 
-          {/* Hydrant list */}
-          {spatial?.closest_hydrants && spatial.closest_hydrants.length > 0 && (
-            <div className="mt-2 rounded border border-blue-900/30 bg-blue-950/10 p-2.5">
-              <p className="text-[10px] font-mono text-blue-500 uppercase tracking-widest mb-1.5">
-                Nearest Hydrants
-              </p>
-              {spatial.closest_hydrants.slice(0, 3).map((h) => (
-                <div key={h.id} className="flex justify-between text-[11px] font-mono text-gray-400 py-0.5">
-                  <span className="text-blue-400">▲ #{h.id}</span>
-                  <span>{h.distance_meters} m</span>
-                  <span className="text-gray-600">{h.status}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Dispatch report — bottom half */}
-        <div className="flex-1 p-4 min-h-0 flex flex-col">
-          <p className="text-[10px] font-mono text-gray-600 uppercase tracking-widest mb-3 flex-shrink-0">
-            ── Dispatch Protocol
-          </p>
-          <div className="flex-1 min-h-0">
-            <DispatchReport report={report} isProcessing={isProcessing} />
-          </div>
-
-          {report && (
+            {/* Mobile: Report button floating over map */}
             <button
-              onClick={() => {
-                fetch(`${API_URL}/api/synthesize`, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ text: report.slice(0, 500) }),
-                })
-                  .then((r) => r.blob())
-                  .then((blob) => {
-                    const url = URL.createObjectURL(blob);
-                    const a = new Audio(url);
-                    a.play();
-                  })
-                  .catch(() => {});
-              }}
-              className="mt-2 w-full py-1.5 text-[11px] font-mono text-teal-600 border border-teal-900/40 rounded hover:bg-teal-950/30 transition-colors flex-shrink-0"
+              onClick={() => setShowReport(true)}
+              disabled={isProcessing}
+              style={{ position: "absolute", bottom: 16, right: 16, display: "flex", alignItems: "center", gap: 6, padding: "10px 16px", borderRadius: 24, background: "var(--red)", color: "#fff", fontWeight: 600, fontSize: 13, border: "none", cursor: "pointer", boxShadow: "0 4px 16px rgba(239,68,68,0.4)" }}
             >
-              🔊 PLAY AUDIO DISPATCH
+              <AlertTriangle style={{ width: 14, height: 14 }} />
+              Report
             </button>
-          )}
-        </div>
+          </>
+        )}
       </div>
+
+      {/* ── Desktop sidebar ── */}
+      {!isMobile && (
+        <div style={{ width: 320, flexShrink: 0, display: "flex", flexDirection: "column", borderLeft: "1px solid var(--border)", height: "100%", background: "var(--bg-sidebar)", overflowY: "auto" }}>
+          {/* Header */}
+          <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <div>
+              <h1 style={{ fontWeight: 700, fontSize: 14, letterSpacing: "0.05em", color: "var(--text)", margin: 0 }}>Delation</h1>
+              <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0 }}>Urban Risk Intelligence · Toronto</p>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              {liveGps && (
+                <span style={{ fontSize: 10, fontFamily: "monospace", padding: "2px 6px", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text-muted)" }}>
+                  📍 {liveGps.lat.toFixed(4)}, {liveGps.lng.toFixed(4)}
+                </span>
+              )}
+              <span style={{ fontSize: 11, color: "#4ade80", fontFamily: "monospace", display: "flex", alignItems: "center", gap: 3 }}>
+                <CheckCheck style={{ width: 12, height: 12 }} />{confirmed}
+              </span>
+              <button onClick={() => setTheme(isDark ? "light" : "dark")} style={{ padding: "4px 6px", border: "1px solid var(--border)", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: "pointer" }}>
+                {isDark ? <Sun style={{ width: 14, height: 14 }} /> : <Moon style={{ width: 14, height: 14 }} />}
+              </button>
+            </div>
+          </div>
+          {PanelContent}
+        </div>
+      )}
+
+      {/* ── Mobile bottom drawer ── */}
+      {isMobile && (
+        <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, background: "var(--bg-sidebar)", borderTop: "1px solid var(--border)", borderRadius: "16px 16px 0 0", transition: "height 0.3s ease", height: panelOpen ? "70vh" : "56px", display: "flex", flexDirection: "column", overflow: "hidden", zIndex: 20 }}>
+          {/* Drawer handle */}
+          <button
+            onClick={() => setPanelOpen((p) => !p)}
+            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", background: "transparent", border: "none", cursor: "pointer", flexShrink: 0 }}
+          >
+            <span style={{ fontWeight: 600, fontSize: 13, color: "var(--text)" }}>
+              {panelOpen ? "Risk Intelligence" : `${wardScores.filter((w) => w.risk_level === "CRITICAL").length} Critical · ${wardScores.length} Wards`}
+            </span>
+            <span style={{ color: "var(--text-muted)" }}>
+              {panelOpen ? <ChevronDown style={{ width: 16, height: 16 }} /> : <ChevronUp style={{ width: 16, height: 16 }} />}
+            </span>
+          </button>
+          {/* Drawer content */}
+          <div style={{ flex: 1, overflowY: "auto" }}>
+            {PanelContent}
+          </div>
+        </div>
+      )}
+
+      {showReport && (
+        <ReportModal
+          initialGps={liveGps ?? undefined}
+          onClose={() => setShowReport(false)}
+          onSubmit={async (transcript, frame, gps) => {
+            setShowReport(false);
+            return handleIncidentSubmit(transcript, frame, gps);
+          }}
+        />
+      )}
+
+      <style>{`
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+        * { -webkit-tap-highlight-color: transparent; }
+        input, textarea, button { font-size: 16px; } /* prevent iOS zoom */
+      `}</style>
     </div>
   );
 }

@@ -1,16 +1,21 @@
 import type { Metadata } from "next";
+import { ThemeProvider } from "next-themes";
 import "./globals.css";
-import "leaflet/dist/leaflet.css";
+import "maplibre-gl/dist/maplibre-gl.css";
 
 export const metadata: Metadata = {
-  title: "CivicVox-Omni · Edge Emergency Intelligence",
-  description: "Local-first multimodal emergency AI for the City of Toronto",
+  title: "Delation · Urban Risk Intelligence",
+  description: "Local-first edge AI for the City of Toronto — powered by NVIDIA GB10",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
-      <body>{children}</body>
+    <html lang="en" suppressHydrationWarning>
+      <body>
+        <ThemeProvider attribute="class" defaultTheme="dark" enableSystem={false}>
+          {children}
+        </ThemeProvider>
+      </body>
     </html>
   );
 }
