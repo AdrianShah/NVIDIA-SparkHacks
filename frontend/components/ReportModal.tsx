@@ -38,12 +38,22 @@ export default function ReportModal({ onClose, initialGps, onSubmit }: Props) {
         ()  => {}
       );
     }
-    navigator.mediaDevices?.getUserMedia({ video: { facingMode: "environment" }, audio: true })
-      .then((s) => {
-        streamRef.current = s;
-        if (videoRef.current) { videoRef.current.srcObject = s; videoRef.current.muted = true; }
-      })
-      .catch(() => setCamError(true));
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setCamError(true);
+    } else {
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: true })
+        .then((s) => {
+          streamRef.current = s;
+          if (videoRef.current) {
+            videoRef.current.srcObject = s;
+            videoRef.current.muted = true;
+            videoRef.current.play().catch(() => {});
+          }
+        })
+        .catch(() => setCamError(true));
+    }
+
     return () => {
       streamRef.current?.getTracks().forEach((t) => t.stop());
       if (timerRef.current)    clearInterval(timerRef.current);
@@ -65,7 +75,9 @@ export default function ReportModal({ onClose, initialGps, onSubmit }: Props) {
   const startVideoRec = () => {
     const stream = streamRef.current;
     if (!stream) return;
-    const mr = new MediaRecorder(stream, { mimeType: "video/webm;codecs=vp8" });
+    const mimeType = ["video/webm;codecs=vp8", "video/webm", "video/mp4", ""]
+      .find((t) => !t || MediaRecorder.isTypeSupported(t)) ?? "";
+    const mr = new MediaRecorder(stream, mimeType ? { mimeType } : {});
     vidRecRef.current = mr;
     setRecSeconds(0);
     setRecording(true);
@@ -166,10 +178,18 @@ export default function ReportModal({ onClose, initialGps, onSubmit }: Props) {
             {/* Camera preview */}
             <div style={{ position: "relative", borderRadius: 12, overflow: "hidden", background: "#000", aspectRatio: "16/9" }}>
               {camError
-                ? <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--text-muted)", fontSize: 13 }}>
-                    <Camera size={20} style={{ marginRight: 8 }} /> Camera unavailable
+                ? <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", gap: 8, padding: 16 }}>
+                    <Camera size={24} style={{ color: "var(--text-muted)" }} />
+                    <span style={{ color: "var(--text-muted)", fontSize: 12, textAlign: "center", fontFamily: "monospace" }}>
+                      Camera unavailable
+                    </span>
+                    <span style={{ color: "var(--text-muted)", fontSize: 10, textAlign: "center", maxWidth: 220 }}>
+                      {typeof window !== "undefined" && location.protocol !== "https:" && !location.hostname.includes("localhost")
+                        ? "⚠ Camera requires HTTPS. Open the app via HTTPS or use text description below."
+                        : "Check browser camera permissions and try again."}
+                    </span>
                   </div>
-                : <video ref={videoRef} autoPlay playsInline style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                : <video ref={videoRef} autoPlay playsInline muted style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
               }
 
               {/* Mode tabs */}
