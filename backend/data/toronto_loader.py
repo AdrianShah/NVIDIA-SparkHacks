@@ -127,6 +127,8 @@ def load_all() -> None:
     streets_path = DATA_DIR / "toronto-centreline.geojson"
     if streets_path.exists():
         _streets_gdf = _read_geodataframe(streets_path)
+        if len(_streets_gdf) > 0:
+            _ = _streets_gdf.sindex
         logger.info("Loaded %d street segments", len(_streets_gdf))
     else:
         logger.info("toronto-centreline.geojson not found — street lookup disabled")
@@ -244,6 +246,30 @@ def get_building_specs(lat: float, lng: float) -> dict:
         ),
         "lat": round(b_lat, 6),
         "lng": round(b_lng, 6),
+    }
+
+
+def get_nearest_road(lat: float, lng: float) -> dict:
+    """Return the nearest street centreline segment to (lat, lng)."""
+    if _streets_gdf is None or len(_streets_gdf) == 0:
+        return {}
+
+    point = _point_utm(lat, lng)
+    _, tree_idx = _streets_gdf.sindex.nearest(point, return_all=False)
+    row = _streets_gdf.iloc[int(tree_idx[0])]
+    dist = float(row.geometry.distance(point))
+
+    return {
+        "road_name": str(
+            _row_val(
+                row,
+                "LINEAR_NAME_FULL",
+                "LINEAR_NAME",
+                "LINEAR_NAME_LABEL",
+                default="Unknown",
+            )
+        ),
+        "distance_meters": round(dist, 1),
     }
 
 
