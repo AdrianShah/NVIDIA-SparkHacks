@@ -389,24 +389,93 @@ function ReportIncidentSheet({ theme, audioStatus, onSubmit, onCancel }: {
   onCancel: () => void;
 }) {
   const [text, setText] = useState("");
+  const [camMode, setCamMode] = useState<"photo" | "video">("photo");
+  const [recording, setRecording] = useState(false);
+  const [recSeconds, setRecSeconds] = useState(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const startRec = () => {
+    if (camMode === "video") {
+      setRecording(true);
+      setRecSeconds(0);
+      timerRef.current = setInterval(() => setRecSeconds((s) => s + 1), 1000);
+    }
+  };
+
+  const stopRec = () => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    setRecording(false);
+  };
+
+  const fmt = (s: number) => `${Math.floor(s / 60).toString().padStart(2, "0")}:${(s % 60).toString().padStart(2, "0")}`;
+
   return (
     <View style={{ flex: 1, justifyContent: "flex-end" }}>
       <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={onCancel} />
       <View style={[styles.reportSheet, { backgroundColor: theme.bgCard, borderColor: theme.border }]}>
         <View style={styles.zoneModalHandle} />
         <Text style={[styles.reportSheetTitle, { color: theme.text }]}>Report an Incident</Text>
-        <Text style={[styles.reportSheetSub, { color: theme.muted }]}>
-          {audioStatus === "MIC RECORDING" ? "🔴 Recording voice…" : `Mic: ${audioStatus}`}
+
+        {/* Camera preview */}
+        <View style={[styles.cameraMiniPreview, { backgroundColor: "#000", borderColor: theme.border }]}>
+          <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+            <Text style={{ color: theme.muted, fontSize: 11, fontFamily: "monospace" }}>📷 Camera feed</Text>
+          </View>
+
+          {/* Mode toggle */}
+          <View style={{ position: "absolute", top: 6, left: "50%", marginLeft: -40, flexDirection: "row", gap: 4, backgroundColor: "rgba(0,0,0,0.6)", paddingHorizontal: 4, paddingVertical: 4, borderRadius: 16 }}>
+            {(["photo", "video"] as const).map((m) => (
+              <TouchableOpacity key={m} onPress={() => { if (!recording) setCamMode(m); }} disabled={recording}
+                style={{ paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12, backgroundColor: camMode === m ? theme.teal : "transparent" }}>
+                <Text style={{ fontSize: 11, fontFamily: "monospace", fontWeight: "600", color: camMode === m ? "#fff" : "#9ca3af" }}>
+                  {m === "photo" ? "📷" : "🎥"}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          {/* Capture/record button */}
+          {camMode === "photo" && (
+            <TouchableOpacity style={{ position: "absolute", bottom: 8, right: 8, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 16, backgroundColor: "rgba(0,0,0,0.7)" }}>
+              <Text style={{ fontSize: 11, fontFamily: "monospace", fontWeight: "600", color: "#fff" }}>📷 Photo</Text>
+            </TouchableOpacity>
+          )}
+
+          {camMode === "video" && (
+            <TouchableOpacity onPress={recording ? stopRec : startRec}
+              style={{ position: "absolute", bottom: 8, right: 8, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 16, backgroundColor: recording ? "#ef4444" : "rgba(0,0,0,0.7)" }}>
+              <Text style={{ fontSize: 11, fontFamily: "monospace", fontWeight: "600", color: "#fff" }}>
+                {recording ? `⏹ ${fmt(recSeconds)}` : "🎥 Record"}
+              </Text>
+            </TouchableOpacity>
+          )}
+        </View>
+
+        {/* GPS */}
+        <Text style={{ fontSize: 10, fontFamily: "monospace", color: theme.muted, marginVertical: 8 }}>
+          📍 43.6532, -79.3832
         </Text>
-        <TextInput
-          style={[styles.textInputBox, { backgroundColor: theme.bgPanel, borderColor: theme.border, color: theme.text }]}
-          placeholder="Describe what you see — flooding, pothole, fire, construction hazard…"
-          placeholderTextColor={theme.muted}
-          multiline
-          numberOfLines={4}
-          value={text}
-          onChangeText={setText}
-        />
+
+        {/* Description input */}
+        <View style={{ marginBottom: 10 }}>
+          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+            <Text style={{ fontSize: 10, fontFamily: "monospace", color: theme.muted }}>DESCRIPTION</Text>
+            <TouchableOpacity style={{ flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 12, borderWidth: 1, borderColor: theme.border }}>
+              <Text style={{ fontSize: 10, fontFamily: "monospace", color: theme.muted }}>🎤 Speak</Text>
+            </TouchableOpacity>
+          </View>
+          <TextInput
+            style={[styles.textInputBox, { backgroundColor: theme.bgPanel, borderColor: theme.border, color: theme.text }]}
+            placeholder="Describe what you see — flooding, pothole, fire…"
+            placeholderTextColor={theme.muted}
+            multiline
+            numberOfLines={4}
+            value={text}
+            onChangeText={setText}
+          />
+        </View>
+
+        {/* Buttons */}
         <View style={styles.reportSheetBtns}>
           <TouchableOpacity style={[styles.cancelBtn, { borderColor: theme.border }]} onPress={onCancel}>
             <Text style={[styles.cancelBtnText, { color: theme.muted }]}>Cancel</Text>
@@ -477,9 +546,9 @@ const styles = StyleSheet.create({
 
   // Report sheet
   reportSheet:        { borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 1, padding: 20, paddingBottom: 40 },
-  reportSheetTitle:   { fontFamily: "monospace", fontWeight: "700", fontSize: 15, marginBottom: 4 },
-  reportSheetSub:     { fontFamily: "monospace", fontSize: 11, marginBottom: 14 },
-  textInputBox:       { borderWidth: 1, borderRadius: 10, padding: 14, minHeight: 90, marginBottom: 16 },
+  reportSheetTitle:   { fontFamily: "monospace", fontWeight: "700", fontSize: 15, marginBottom: 8 },
+  cameraMiniPreview:  { height: 140, borderRadius: 10, marginBottom: 10, overflow: "hidden" },
+  textInputBox:       { borderWidth: 1, borderRadius: 10, padding: 14, minHeight: 80, marginBottom: 12 },
   textInputPlaceholder: { fontFamily: "monospace", fontSize: 13, lineHeight: 20 },
   reportSheetBtns:    { flexDirection: "row", gap: 10 },
   cancelBtn:          { flex: 1, borderWidth: 1, borderRadius: 10, paddingVertical: 12, alignItems: "center" },
