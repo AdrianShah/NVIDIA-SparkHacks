@@ -1,0 +1,8 @@
+# Person 1 — GPU & inference dependencies (install on GB10)
+# Usage: pip install -r requirements-inference.txt
+faster-whisper>=1.0.0
+kokoro-onnx>=0.3.0
+numpy>=1.26.0
+httpx>=0.27.0
+# Optional for test_vlm.py tiny JPEG generation
+Pillow>=10.0.0
