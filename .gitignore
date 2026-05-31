@@ -23,3 +23,4 @@ mobile/.env
 # 311 download artifacts (canonical file is 311-service-requests.csv)
 backend/data/311-service-requests.zip
 backend/data/SR2026.csv
+frontend/certificates/
